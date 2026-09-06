@@ -1,0 +1,6 @@
+bin/
+obj/
+*.user
+installer/*.msi
+installer/*.wixpdb
+installer/*.log

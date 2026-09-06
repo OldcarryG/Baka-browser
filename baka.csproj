@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>baka</AssemblyName>
+    <RootNamespace>Baka</RootNamespace>
+    <ApplicationIcon>baka.ico</ApplicationIcon>
+    <!-- the installer reads this, so bump it here and nowhere else -->
+    <Version>1.0.0</Version>
+    <Company>baka</Company>
+    <Product>baka</Product>
+    <!-- publish/ is what the installer harvests; the symbols and the duplicate native copy are not wanted -->
+    <DebugType>none</DebugType>
+    <!-- no bundled engine or runtime: uses the WebView2 + .NET already on the machine -->
+    <SelfContained>false</SelfContained>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <TieredPGO>true</TieredPGO>
+    <ServerGarbageCollector>false</ServerGarbageCollector>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <!-- nothing here listens to EventSource counters or hot-reloads; both are pure startup cost -->
+    <EventSourceSupport>false</EventSourceSupport>
+    <MetadataUpdaterSupport>false</MetadataUpdaterSupport>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <!-- WebView2 ships a WPF control we never reference; ignore its WindowsBase unification noise -->
+    <MSBuildWarningsAsMessages>MSB3277</MSBuildWarningsAsMessages>
+    <!-- WFO1000 wants designer-serialization attributes on custom control properties. There is no
+         designer here (every control is built in code), so the attributes would be pure ceremony.
+         WFO5001 is Application.SetColorMode, still marked experimental: it is what makes the native
+         scrollbars, combo boxes and spinners dark instead of a light stripe on a dark sheet. -->
+    <NoWarn>WFO1000;WFO5001</NoWarn>
+    <!-- don't copy referenced packages' 800 KB of XML docs next to the exe -->
+    <AllowedReferenceRelatedFileExtensions>none</AllowedReferenceRelatedFileExtensions>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.*" />
+    <!-- the window/taskbar icon and the mark on the new-tab page, both from `baka icon.jpg` -->
+    <EmbeddedResource Include="baka.ico" LogicalName="baka.ico" />
+    <EmbeddedResource Include="baka-logo.png" LogicalName="baka-logo.png" />
+  </ItemGroup>
+
+</Project>
