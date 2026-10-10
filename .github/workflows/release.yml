@@ -40,7 +40,9 @@ jobs:
           }
 
           $notes = Get-Content RELEASE_NOTES.md -Raw
-          if ($notes -notmatch "(?m)^# Baka Browser $([regex]::Escape($version)) Release$") {
+          $expectedHeading = "# Baka Browser $version Release"
+          $firstLine = ($notes -split "`r?`n", 2)[0]
+          if ($firstLine -ne $expectedHeading) {
             throw "RELEASE_NOTES.md must start with '# Baka Browser $version Release'."
           }
 
