@@ -10,28 +10,72 @@ namespace Baka;
 static class Theme
 {
     public static bool GlassOn { get; private set; }
+    public static bool CustomMode => Config.Current.ThemeMode == "Custom";
+    static Color CustomSurface
+    {
+        get
+        {
+            try { return ColorTranslator.FromHtml(Config.Current.CustomBackgroundColor); }
+            catch { return Color.FromArgb(0x30, 0x24, 0x3B); }
+        }
+    }
+    static double Luminance(Color c)
+    {
+        static double Channel(int v)
+        {
+            var s = v / 255.0;
+            return s <= 0.04045 ? s / 12.92 : Math.Pow((s + 0.055) / 1.055, 2.4);
+        }
+        return 0.2126 * Channel(c.R) + 0.7152 * Channel(c.G) + 0.0722 * Channel(c.B);
+    }
+    static Color Blend(Color color, Color target, float amount) => Color.FromArgb(
+        (int)(color.R + (target.R - color.R) * amount),
+        (int)(color.G + (target.G - color.G) * amount),
+        (int)(color.B + (target.B - color.B) * amount));
+    public static bool DarkMode => CustomMode ? Luminance(CustomSurface) < 0.18 : Config.Current.ThemeMode != "Light";
 
     /// Black once the backdrop is up, a flat near-black on older Windows where it is not.
-    public static Color ChromeBg => GlassOn ? Color.Black : Color.FromArgb(0x24, 0x24, 0x26);
+    public static Color ChromeBg => CustomMode ? Blend(CustomSurface, DarkMode ? Color.Black : Color.White, 0.12f)
+        : GlassOn ? (DarkMode ? Color.Black : Color.White) : DarkMode
+            ? Color.FromArgb(0x24, 0x24, 0x26) : Color.FromArgb(0xF7, 0xF7, 0xF9);
 
-    // Apple dark-mode system colours.
-    public static readonly Color Content = Color.FromArgb(0x1C, 0x1C, 0x1E);   // systemBackground
+    // Dark and light system palettes. Custom keeps the dark surfaces and changes the accent.
+    public static Color Content => CustomMode ? CustomSurface
+        : DarkMode ? Color.FromArgb(0x1C, 0x1C, 0x1E) : Color.FromArgb(0xFA, 0xFA, 0xFC);
     /// The tab row has to be opaque (see TabStrip), so it cannot be glass — but Content is twice as
     /// bright as Mica-over-black measures (~#0D0A0E here), which read as a pale band across the top.
     /// This is close enough to the backdrop that the seam disappears.
-    public static readonly Color Strip = Color.FromArgb(0x10, 0x10, 0x12);
-    public static readonly Color Fill1 = Color.FromArgb(0x2C, 0x2C, 0x2E);     // secondary
-    public static readonly Color Fill2 = Color.FromArgb(0x3A, 0x3A, 0x3C);     // tertiary
-    public static readonly Color Fill3 = Color.FromArgb(0x48, 0x48, 0x4A);     // systemGray4
-    public static readonly Color Text = Color.FromArgb(0xF2, 0xF2, 0xF7);      // label
+    public static Color Strip => CustomMode ? Blend(Content, DarkMode ? Color.Black : Color.White, 0.22f)
+        : DarkMode ? Color.FromArgb(0x10, 0x10, 0x12) : Color.FromArgb(0xEF, 0xEF, 0xF3);
+    public static Color Fill1 => CustomMode ? Blend(Content, DarkMode ? Color.White : Color.Black, 0.07f)
+        : DarkMode ? Color.FromArgb(0x2C, 0x2C, 0x2E) : Color.White;
+    public static Color Fill2 => CustomMode ? Blend(Content, DarkMode ? Color.White : Color.Black, 0.14f)
+        : DarkMode ? Color.FromArgb(0x3A, 0x3A, 0x3C) : Color.FromArgb(0xF2, 0xF2, 0xF6);
+    public static Color Fill3 => CustomMode ? Blend(Content, DarkMode ? Color.White : Color.Black, 0.22f)
+        : DarkMode ? Color.FromArgb(0x48, 0x48, 0x4A) : Color.FromArgb(0xE5, 0xE5, 0xEA);
+    public static Color Text => DarkMode ? Color.FromArgb(0xF2, 0xF2, 0xF7) : Color.FromArgb(0x1C, 0x1C, 0x1E);
     /// secondaryLabel, which on Apple's dark backgrounds is white at 60% rather than systemGray:
     /// #8E8E93 only made 4.06:1 against Fill1, under the 4.5:1 floor for text this size. This makes 5.3:1.
-    public static readonly Color Muted = Color.FromArgb(0x9E, 0x9E, 0xA3);
-    public static readonly Color Accent = Color.FromArgb(0x0A, 0x84, 0xFF);    // systemBlue
-    public static readonly Color Line = Color.FromArgb(0x38, 0x38, 0x3A);
-    /// systemRed, lightened. The stock #FF453A made only 4.09:1 against Fill1 — and Fill1 is exactly
-    /// where it is used as text, on the "this extension cannot work here" line in settings. 4.94:1.
-    public static readonly Color Bad = Color.FromArgb(0xFF, 0x69, 0x61);
+    public static Color Muted => DarkMode ? Color.FromArgb(0x9E, 0x9E, 0xA3) : Color.FromArgb(0x63, 0x63, 0x66);
+    static string? _accentValue;
+    static Color _accentColor;
+    public static Color Accent
+    {
+        get
+        {
+            var value = Config.Current.AccentColor;
+            if (_accentValue != value)
+            {
+                _accentColor = ColorTranslator.FromHtml(value);
+                _accentValue = value;
+            }
+            return _accentColor;
+        }
+    }
+    public static Color Line => CustomMode ? Blend(Content, DarkMode ? Color.White : Color.Black, 0.28f)
+        : DarkMode ? Color.FromArgb(0x38, 0x38, 0x3A) : Color.FromArgb(0xD1, 0xD1, 0xD6);
+    /// systemRed, lightened. This keeps error and warning text readable against a card background.
+    public static Color Bad => DarkMode ? Color.FromArgb(0xFF, 0x69, 0x61) : Color.FromArgb(0xD7, 0x00, 0x15);
 
     [DllImport("user32.dll")] static extern uint GetDpiForSystem();
 
@@ -85,6 +129,8 @@ static class Theme
     public const string Add = "", Close = "", Settings = "";
     public const string Shield = "", NoShield = "";
     public const string Star = "", StarFill = "";
+    public const string Fullscreen = "";
+    public const string Private = "";
 
     // Address-bar and tab marks: padlock on https, warning on http, magnifier when the bar is empty,
     // globe for a tab whose site has no favicon.
@@ -119,23 +165,31 @@ static class Theme
     [StructLayout(LayoutKind.Sequential)]
     struct Margins { public int Left, Right, Top, Bottom; }
 
-    const int DarkMode = 20, CornerPref = 33, CaptionColor = 35, BackdropType = 38;
+    const int DarkModeAttribute = 20, CornerPref = 33, CaptionColor = 35, BackdropType = 38;
 
     /// Dark frame + rounded corners, and on Win11 22H2+ a Mica backdrop behind the whole client area.
     /// Mica is picked over Acrylic on purpose: it is a one-off blur of the wallpaper, so it costs no
     /// per-frame GPU work, where Acrylic re-blurs whatever is behind the window every frame.
     /// `backdrop: false` keeps the dark frame but leaves the client area an opaque sheet.
-    public static void Glass(Form f, bool backdrop = true)
+    public static void Glass(Form f, bool backdrop = true, bool updateGlobalBackdrop = false)
     {
-        var on = 1;
-        try { DwmSetWindowAttribute(f.Handle, DarkMode, ref on, sizeof(int)); } catch { return; }
+        if (updateGlobalBackdrop) GlassOn = false;
+        var on = DarkMode ? 1 : 0;
+        try { DwmSetWindowAttribute(f.Handle, DarkModeAttribute, ref on, sizeof(int)); } catch { return; }
         var round = 2 /* DWMWCP_ROUND */;
         DwmSetWindowAttribute(f.Handle, CornerPref, ref round, sizeof(int));
         // Dark mode alone is not enough: with "show accent colour on title bars" on, the caption of any
         // window that still has one comes up in the accent colour. This pins it to the sheet colour.
         var caption = Content.B << 16 | Content.G << 8 | Content.R;   // COLORREF is 0x00BBGGRR
         DwmSetWindowAttribute(f.Handle, CaptionColor, ref caption, sizeof(int));
-        if (!backdrop) return;
+        if (!backdrop || !Config.Current.LiquidGlassEnabled || CustomMode)
+        {
+            var none = 1 /* DWMSBT_NONE */;
+            DwmSetWindowAttribute(f.Handle, BackdropType, ref none, sizeof(int));
+            var clear = new Margins();
+            DwmExtendFrameIntoClientArea(f.Handle, ref clear);
+            return;
+        }
 
         var mica = 4 /* DWMSBT_TABBEDWINDOW */;
         if (DwmSetWindowAttribute(f.Handle, BackdropType, ref mica, sizeof(int)) != 0) return;  // pre-22H2
@@ -143,7 +197,7 @@ static class Theme
         // background erase is a GDI FillRect, which does exactly that — so the glassy controls below
         // paint no background of their own and let it happen.
         var all = new Margins { Left = -1, Right = -1, Top = -1, Bottom = -1 };
-        if (DwmExtendFrameIntoClientArea(f.Handle, ref all) == 0) GlassOn = true;
+        if (DwmExtendFrameIntoClientArea(f.Handle, ref all) == 0 && updateGlobalBackdrop) GlassOn = true;
     }
 }
 
@@ -168,6 +222,27 @@ static class Draw
         using var path = Round(r, radius);
         using var brush = new SolidBrush(c);
         g.FillPath(brush, path);
+    }
+
+    /// Static layered highlight for glass-style controls. It deliberately avoids animation and large
+    /// blur surfaces; the OS backdrop and the dashboard provide depth while this stays cheap to repaint.
+    public static void Glass(Graphics g, RectangleF r, Color baseColor, float radius)
+    {
+        if (r.Width <= 0 || r.Height <= 0) return;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using var path = Round(r, radius);
+        var top = Theme.DarkMode
+            ? Color.FromArgb(Math.Min(255, baseColor.R + 17), Math.Min(255, baseColor.G + 17), Math.Min(255, baseColor.B + 17))
+            : Color.FromArgb(Math.Max(0, baseColor.R - 5), Math.Max(0, baseColor.G - 5), Math.Max(0, baseColor.B - 5));
+        using (var brush = new LinearGradientBrush(r, top, baseColor, LinearGradientMode.Vertical))
+            g.FillPath(brush, path);
+        using var edge = new Pen(Color.FromArgb(Theme.DarkMode ? 58 : 116, Color.White), 1f);
+        g.DrawPath(edge, path);
+        var shine = new RectangleF(r.X + 1.5f, r.Y + 1.5f, Math.Max(0, r.Width - 3), Math.Max(1, r.Height * .34f));
+        using var shinePath = Round(shine, Math.Min(radius, shine.Height / 2));
+        using var shineBrush = new LinearGradientBrush(shine, Color.FromArgb(Theme.DarkMode ? 18 : 38, Color.White),
+            Color.FromArgb(0, Color.White), LinearGradientMode.Vertical);
+        g.FillPath(shineBrush, shinePath);
     }
 
     public static void Stroke(Graphics g, RectangleF r, Color c, float radius, float width = 1f)
@@ -213,9 +288,6 @@ sealed class IconButton : Control
     bool _hot, _down;
 
     public string Glyph { get; set; }
-    /// A pinned extension's own icon, drawn instead of the glyph.
-    public Image? Picture { get; set; }
-
     public IconButton(string glyph, string tip, float size = 10f)
     {
         Glyph = glyph;
@@ -253,20 +325,16 @@ sealed class IconButton : Control
         var g = e.Graphics;
         var pad = Theme.Sf(2);
         if (Enabled && (_hot || _down))
-            Draw.Fill(g, new RectangleF(pad, pad, Width - pad * 2, Height - pad * 2),
-                _down ? Theme.Fill3 : Theme.Fill2, Theme.Sf(8));
+        {
+            var r = new RectangleF(pad, pad, Width - pad * 2, Height - pad * 2);
+            if (Config.Current.LiquidGlassEnabled) Draw.Glass(g, r, _down ? Theme.Fill3 : Theme.Fill2, Theme.Sf(8));
+            else Draw.Fill(g, r, _down ? Theme.Fill3 : Theme.Fill2, Theme.Sf(8));
+        }
         // ShowFocusCues is false until the user actually uses the keyboard, so a mouse click does not
         // leave a ring behind and the button that happens to hold focus at startup stays quiet.
         if (Focused && ShowFocusCues)
             Draw.Stroke(g, new RectangleF(1.5f, 1.5f, Width - 3, Height - 3), Theme.Accent, Theme.R, Theme.Sf(1.6f));
 
-        if (Picture is { } pic)
-        {
-            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-            var box = Theme.S(18);
-            g.DrawImage(pic, (Width - box) / 2, (Height - box) / 2, box, box);
-            return;
-        }
         Draw.Glyph(g, Glyph, Ascii(Glyph) ? Theme.UiBold : _font, Enabled ? Theme.Text : Theme.Muted, ClientRectangle);
     }
 
@@ -275,7 +343,7 @@ sealed class IconButton : Control
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) { _font.Dispose(); Picture?.Dispose(); }
+        if (disposing) _font.Dispose();
         base.Dispose(disposing);
     }
 }
@@ -306,7 +374,7 @@ sealed class OmniBox : Panel
     }
 
     /// The security mark for a URL: https gets the padlock, plain http the warning, and anything with no
-    /// transport to speak of (about:blank, an extension page, a local file) the magnifier.
+    /// transport to speak of (about:blank or a local file) the magnifier.
     public static string Mark(string url) => url.StartsWith("https://") ? Theme.Lock
         : url.StartsWith("http://") ? Theme.Insecure : Theme.Search;
 
@@ -342,6 +410,8 @@ sealed class OmniBox : Panel
         // alone, so its rect is a hole the Mica backdrop shows through no matter what we put behind it.
         // Filling the rest of the pill made that hole a differently-tinted smear; letting the whole field
         // be glass makes it one surface with the toolbar, and the hairline still says "type here".
+        if (Config.Current.LiquidGlassEnabled)
+            Draw.Glass(g, field, Theme.Fill1, Theme.R);
         Draw.Stroke(g, field, _focused ? Theme.Accent : Theme.Line, Theme.R, _focused ? Theme.Sf(1.6f) : 1f);
         if (_leading.Length > 0)
             Draw.Glyph(g, _leading, _mark, _leading == Theme.Insecure ? Theme.Bad : Theme.Muted,
@@ -384,11 +454,15 @@ sealed class TabStrip : Control
     /// the size you can actually aim at. 7pt Fluent renders a ~6 px hairline cross: legible as an
     /// icon, invisible as a button.
     readonly Font _plusFont;
+    readonly ToolTip _tips = new() { InitialDelay = 450, ReshowDelay = 120 };
     public List<StripTab> Tabs { get; } = [];
     public int SelectedIndex { get; private set; } = -1;
+    public bool Vertical { get; set; }
+    public bool Compact { get; set; }
 
     int _hotTab = -1, _hotClose = -1, _hotCap = -1;
     bool _hotPlus;
+    int _scrollOffset;
 
     public event Action<int>? SelectionChanged;
     public event Action<int>? CloseClicked;
@@ -426,12 +500,21 @@ sealed class TabStrip : Control
     int TabWidth => Tabs.Count == 0 ? 0
         : Math.Clamp((Width - PlusWidth - CapW * 3 - Edge * 2) / Tabs.Count - Gap, MinTabWidth, MaxTabWidth);
 
-    Rectangle TabRect(int i) => new(Edge + i * (TabWidth + Gap), Inset, TabWidth, Height - Inset * 2);
+    public void RefreshLayout()
+    {
+        _scrollOffset = Math.Clamp(_scrollOffset, 0, Math.Max(0, Tabs.Count * Theme.S(44) - Height + Theme.S(44)));
+        Invalidate();
+    }
+
+    Rectangle TabRect(int i) => Vertical
+        ? new Rectangle(Theme.S(4), Theme.S(40) + i * Theme.S(44) - _scrollOffset,
+            Math.Max(Theme.S(34), Width - Theme.S(8)), Theme.S(40))
+        : new Rectangle(Edge + i * (TabWidth + Gap), Inset, TabWidth, Height - Inset * 2);
 
     Rectangle CloseRect(int i)
     {
         var t = TabRect(i);
-        return new Rectangle(t.Right - CloseSize - Theme.S(7), t.Y + (t.Height - CloseSize) / 2, CloseSize, CloseSize);
+        return new Rectangle(t.Right - CloseSize - Theme.S(4), t.Y + (t.Height - CloseSize) / 2, CloseSize, CloseSize);
     }
 
     /// Full `PlusWidth` of hit area — the strip already reserves that much in TabWidth, so the button
@@ -441,6 +524,7 @@ sealed class TabStrip : Control
     /// minimises the window.
     public Rectangle PlusRect()
     {
+        if (Vertical) return new Rectangle(Theme.S(4), Theme.S(3), Math.Max(Theme.S(34), Width - Theme.S(8)), Theme.S(32));
         var x = Math.Min(Edge + Tabs.Count * (TabWidth + Gap) + Theme.S(2),
                          Width - CapW * 3 - PlusWidth - Theme.S(4));
         return new Rectangle(Math.Max(Edge, x), Inset, PlusWidth, Height - Inset * 2);
@@ -450,18 +534,18 @@ sealed class TabStrip : Control
     /// other Win11 window.
     Rectangle CapRect(int i) => new(Width - CapW * (3 - i), 0, CapW, Height);
 
-    int CapHit(Point p) =>
+    int CapHit(Point p) => !Vertical &&
         p.X >= Width - CapW * 3 ? Math.Clamp((p.X - (Width - CapW * 3)) / CapW, 0, 2) : -1;
 
     /// The leftover space, which the form reports to Windows as the caption it no longer draws.
     public bool Caption(Point p) =>
-        CapHit(p) < 0 && !PlusRect().Contains(p) &&
+        !Vertical && CapHit(p) < 0 && !PlusRect().Contains(p) &&
         !Enumerable.Range(0, Tabs.Count).Any(i => TabRect(i).Contains(p));
 
     /// Where maximise is. The form reports this one rect to Windows as HTMAXBUTTON so that hovering it
     /// opens the Win11 snap-layouts flyout — which also makes it non-client, so its hover and its click
     /// arrive at the form as WM_NC* messages and come back in through HotCap and CapClick.
-    public Rectangle MaxRect => CapRect(1);
+    public Rectangle MaxRect => Vertical ? Rectangle.Empty : CapRect(1);
 
     /// -1 for none. Set from the form while the pointer is on the non-client maximise button, because
     /// OnMouseMove below never sees that rect.
@@ -502,7 +586,20 @@ sealed class TabStrip : Control
             Cursor = plus ? Cursors.Hand : Cursors.Default;
             Invalidate();
         }
+        _tips.SetToolTip(this, _hotPlus ? "New tab" : Vertical && Compact && tab >= 0 ? Tabs[tab].Title : "");
         base.OnMouseMove(e);
+    }
+
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+        if (Vertical)
+        {
+            var row = Theme.S(44);
+            var max = Math.Max(0, Tabs.Count * row - Math.Max(0, Height - Theme.S(40)));
+            _scrollOffset = Math.Clamp(_scrollOffset - Math.Sign(e.Delta) * row * 3, 0, max);
+            Invalidate();
+        }
+        base.OnMouseWheel(e);
     }
 
     protected override void OnMouseLeave(EventArgs e)
@@ -516,7 +613,7 @@ sealed class TabStrip : Control
     protected override void OnMouseDown(MouseEventArgs e)
     {
         base.OnMouseDown(e);
-        if (e.Button == MouseButtons.Left && CapHit(e.Location) is var cap and >= 0 && FindForm() is not null)
+        if (!Vertical && e.Button == MouseButtons.Left && CapHit(e.Location) is var cap and >= 0 && FindForm() is not null)
         {
             CapClick(cap);
             return;
@@ -526,7 +623,8 @@ sealed class TabStrip : Control
         {
             if (!TabRect(i).Contains(e.Location)) continue;
             // middle-click anywhere on a tab closes it, same as every other browser
-            if (e.Button == MouseButtons.Middle || (e.Button == MouseButtons.Left && CloseRect(i).Contains(e.Location)))
+            if (e.Button == MouseButtons.Middle ||
+                (e.Button == MouseButtons.Left && !Compact && CloseRect(i).Contains(e.Location)))
                 CloseClicked?.Invoke(i);
             else if (e.Button == MouseButtons.Left)
                 Select(i);
@@ -544,6 +642,47 @@ sealed class TabStrip : Control
         using (var bg = new SolidBrush(Theme.Strip)) g.FillRectangle(bg, ClientRectangle);
         g.InterpolationMode = InterpolationMode.HighQualityBicubic;
 
+        if (Vertical)
+        {
+            if (_hotPlus) Draw.Fill(g, PlusRect(), Theme.Fill2, Theme.R - 1);
+            Draw.Glyph(g, Theme.Add, _plusFont, Theme.Text, PlusRect());
+            for (var i = 0; i < Tabs.Count; i++)
+            {
+                var r = TabRect(i);
+                if (!r.IntersectsWith(ClientRectangle)) continue;
+                var active = i == SelectedIndex;
+                if (active || i == _hotTab)
+                {
+                    if (Config.Current.LiquidGlassEnabled) Draw.Glass(g, r, active ? Theme.Fill2 : Theme.Fill1, Theme.R - 1);
+                    else Draw.Fill(g, r, active ? Theme.Fill2 : Theme.Fill1, Theme.R - 1);
+                }
+                if (active)
+                {
+                    using var activeMark = new SolidBrush(Theme.Accent);
+                    g.FillRectangle(activeMark, r.X, r.Y + Theme.S(8), Theme.S(2), r.Height - Theme.S(16));
+                }
+                var mark = Compact
+                    ? new Rectangle(r.X + (r.Width - IconBox) / 2, r.Y + (r.Height - IconBox) / 2, IconBox, IconBox)
+                    : new Rectangle(r.X + Theme.S(10), r.Y + (r.Height - IconBox) / 2, IconBox, IconBox);
+                if (Tabs[i].Icon is { } icon) g.DrawImage(icon, mark);
+                else Draw.Glyph(g, Theme.Globe, _iconFont, Theme.Muted, mark);
+                if (!Compact)
+                {
+                    var showClose = active || i == _hotTab;
+                    var right = showClose ? CloseRect(i).Left - Theme.S(2) : r.Right - Theme.S(7);
+                    Draw.Label(g, Tabs[i].Title, active ? Theme.UiBold : Theme.Ui, active ? Theme.Text : Theme.Muted,
+                        new RectangleF(mark.Right + Theme.S(8), r.Y, Math.Max(4, right - mark.Right - Theme.S(8)), r.Height));
+                    if (showClose)
+                    {
+                        var close = CloseRect(i);
+                        if (i == _hotClose) Draw.Fill(g, Rectangle.Inflate(close, -Theme.S(2), -Theme.S(2)), Theme.Fill3, close.Height / 2f);
+                        Draw.Glyph(g, Theme.Close, _iconFont, i == _hotClose ? Theme.Text : Theme.Muted, close);
+                    }
+                }
+            }
+            return;
+        }
+
         for (var i = 0; i < Tabs.Count; i++)
         {
             var r = TabRect(i);
@@ -551,7 +690,15 @@ sealed class TabStrip : Control
             // Unfilled unless active or hovered: nine identical grey pills is a lot of furniture for
             // information the title already carries.
             if (active || i == _hotTab)
-                Draw.Fill(g, r, active ? Theme.Fill2 : Theme.Fill1, Theme.R - 1);
+            {
+                if (Config.Current.LiquidGlassEnabled) Draw.Glass(g, r, active ? Theme.Fill2 : Theme.Fill1, Theme.R - 1);
+                else Draw.Fill(g, r, active ? Theme.Fill2 : Theme.Fill1, Theme.R - 1);
+            }
+            if (active)
+            {
+                using var activeMark = new SolidBrush(Theme.Accent);
+                g.FillRectangle(activeMark, r.X + Theme.S(12), r.Bottom - Theme.S(3), r.Width - Theme.S(24), Theme.S(2));
+            }
 
             var mark = new Rectangle(r.X + Theme.S(10), r.Y + (r.Height - IconBox) / 2, IconBox, IconBox);
             if (Tabs[i].Icon is { } icon) g.DrawImage(icon, mark);
@@ -590,7 +737,7 @@ sealed class TabStrip : Control
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) { _iconFont.Dispose(); _plusFont.Dispose(); }
+        if (disposing) { _iconFont.Dispose(); _plusFont.Dispose(); _tips.Dispose(); }
         base.Dispose(disposing);
     }
 }
@@ -600,6 +747,10 @@ sealed class TabStrip : Control
 sealed class PillBar : Control
 {
     readonly List<(string Text, Rectangle R)> _items = [];
+    readonly ToolTip _tips = new() { InitialDelay = 350, ReshowDelay = 100 };
+    string[] _labels = [];
+    bool _vertical, _compact;
+    int _scrollOffset;
     int _hot = -1;
 
     /// index, which button. Right-click and middle-click both matter here.
@@ -613,19 +764,65 @@ sealed class PillBar : Control
         Height = Theme.S(30);
     }
 
-    public void Set(IEnumerable<string> labels)
+    public void Set(IEnumerable<string> labels, bool vertical = false, bool compact = false)
+    {
+        _labels = [.. labels];
+        _vertical = vertical;
+        _compact = compact;
+        _scrollOffset = 0;
+        LayoutItems();
+    }
+
+    void LayoutItems()
     {
         _items.Clear();
         _hot = -1;
-        using var g = CreateGraphics();
-        var x = Theme.S(8);
-        foreach (var text in labels)
+        if (!_vertical && !IsHandleCreated) { Invalidate(); return; }
+        using var g = _vertical ? null : CreateGraphics();
+        if (_vertical)
         {
-            var w = Math.Min(Theme.S(190), (int)Math.Ceiling(g.MeasureString(text, Theme.Ui).Width) + Theme.S(18));
-            _items.Add((text, new Rectangle(x, Theme.S(3), w, Height - Theme.S(7))));
-            x += w + Theme.S(3);
+            var row = Theme.S(34);
+            var x = Theme.S(4);
+            var w = Math.Max(Theme.S(30), Width - Theme.S(8));
+            for (var i = 0; i < _labels.Length; i++)
+                _items.Add((_labels[i], new Rectangle(x, Theme.S(2) + i * row - _scrollOffset,
+                    w, row - Theme.S(4))));
+        }
+        else
+        {
+            var x = Theme.S(8);
+            foreach (var text in _labels)
+            {
+                var w = Math.Min(Theme.S(190), (int)Math.Ceiling(g!.MeasureString(text, Theme.Ui).Width) + Theme.S(18));
+                _items.Add((text, new Rectangle(x, Theme.S(3), w, Height - Theme.S(7))));
+                x += w + Theme.S(3);
+            }
         }
         Invalidate();
+    }
+
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+        LayoutItems();
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        LayoutItems();
+    }
+
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+        if (_vertical)
+        {
+            var row = Theme.S(34);
+            var max = Math.Max(0, _labels.Length * row - Height);
+            _scrollOffset = Math.Clamp(_scrollOffset - Math.Sign(e.Delta) * row * 3, 0, max);
+            LayoutItems();
+        }
+        base.OnMouseWheel(e);
     }
 
     int HitTest(Point p) => _items.FindIndex(i => i.R.Contains(p));
@@ -635,6 +832,7 @@ sealed class PillBar : Control
         var hot = HitTest(e.Location);
         if (hot != _hot) { _hot = hot; Invalidate(); }
         Cursor = hot >= 0 ? Cursors.Hand : Cursors.Default;
+        _tips.SetToolTip(this, _compact && hot >= 0 ? _items[hot].Text : "");
         base.OnMouseMove(e);
     }
 
@@ -652,8 +850,20 @@ sealed class PillBar : Control
         for (var i = 0; i < _items.Count; i++)
         {
             var (text, r) = _items[i];
-            Draw.Fill(g, r, i == _hot ? Theme.Fill2 : Theme.Fill1, Theme.Sf(7));
-            Draw.Label(g, text, Theme.Ui, i == _hot ? Theme.Text : Theme.Muted, r, centre: true);
+            if (!r.IntersectsWith(ClientRectangle)) continue;
+            if (Config.Current.LiquidGlassEnabled) Draw.Glass(g, r, i == _hot ? Theme.Fill2 : Theme.Fill1, Theme.Sf(7));
+            else Draw.Fill(g, r, i == _hot ? Theme.Fill2 : Theme.Fill1, Theme.Sf(7));
+            var shown = _compact ? (text.Length == 0 ? "•" : text[..1].ToUpperInvariant()) : text;
+            var labelRect = _vertical && !_compact
+                ? Rectangle.Inflate(r, -Theme.S(8), -Theme.S(1)) : r;
+            Draw.Label(g, shown, Theme.Ui, i == _hot ? Theme.Text : Theme.Muted, labelRect,
+                centre: !_vertical || _compact);
         }
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) _tips.Dispose();
+        base.Dispose(disposing);
     }
 }

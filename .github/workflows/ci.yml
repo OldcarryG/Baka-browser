@@ -1,0 +1,27 @@
+name: Build Windows app
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-build:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore dependencies
+        run: dotnet restore baka.csproj --configfile nuget.config
+
+      - name: Build Release configuration
+        run: dotnet build baka.csproj -c Release --no-restore

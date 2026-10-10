@@ -1,0 +1,72 @@
+name: Build and publish Windows release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows-release:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Validate release version and notes
+        id: version
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Release tags must use vMAJOR.MINOR.PATCH, for example v1.2.0."
+          }
+
+          $project = Get-Content baka.csproj -Raw
+          $projectVersion = [regex]::Match($project, '<Version>([^<]+)</Version>').Groups[1].Value
+          if ($version -ne $projectVersion) {
+            throw "Tag version $version does not match baka.csproj version $projectVersion."
+          }
+
+          $notes = Get-Content RELEASE_NOTES.md -Raw
+          if ($notes -notmatch "(?m)^# Baka Browser $([regex]::Escape($version)) Release$") {
+            throw "RELEASE_NOTES.md must start with '# Baka Browser $version Release'."
+          }
+
+          "value=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Publish self-contained Windows app
+        run: dotnet publish baka.csproj -c Release -r win-x64 --self-contained true -p:Version=${{ steps.version.outputs.value }} -o publish
+
+      - name: Install Velopack packager
+        run: dotnet tool install --global vpk --version 1.2.161
+
+      - name: Download previous release for delta updates
+        continue-on-error: true
+        run: vpk download github --repoUrl https://github.com/${{ github.repository }} --outputDir Releases
+
+      - name: Build installer and update packages
+        run: >-
+          vpk pack --packId BakaBrowser --packTitle "Baka Browser"
+          --packVersion ${{ steps.version.outputs.value }} --packDir publish
+          --mainExe baka.exe --icon baka.ico --framework webview2
+          --releaseNotes RELEASE_NOTES.md --outputDir Releases
+
+      - name: Publish GitHub release
+        env:
+          VPK_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          vpk upload github --repoUrl https://github.com/${{ github.repository }}
+          --outputDir Releases --publish --tag ${{ github.ref_name }}
+          --releaseName "Baka Browser ${{ steps.version.outputs.value }}"

@@ -10,7 +10,7 @@
     <RootNamespace>Baka</RootNamespace>
     <ApplicationIcon>baka.ico</ApplicationIcon>
     <!-- the installer reads this, so bump it here and nowhere else -->
-    <Version>1.0.0</Version>
+    <Version>1.2.0</Version>
     <Company>baka</Company>
     <Product>baka</Product>
     <!-- publish/ is what the installer harvests; the symbols and the duplicate native copy are not wanted -->
@@ -38,7 +38,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.*" />
+    <!-- Keep the build reproducible. The Evergreen WebView2 Runtime updates independently on user PCs. -->
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4191.47" />
+    <PackageReference Include="Velopack" Version="1.2.161" />
     <!-- the window/taskbar icon and the mark on the new-tab page, both from `baka icon.jpg` -->
     <EmbeddedResource Include="baka.ico" LogicalName="baka.ico" />
     <EmbeddedResource Include="baka-logo.png" LogicalName="baka-logo.png" />
