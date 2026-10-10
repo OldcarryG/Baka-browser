@@ -1,6 +1,10 @@
 bin/
 obj/
+.tools/
+publish/
+Releases/
 *.user
+*.tmp
 installer/*.msi
 installer/*.wixpdb
 installer/*.log

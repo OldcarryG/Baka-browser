@@ -1,8 +1,8 @@
-using System.IO.Compression;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
-using System.Text.RegularExpressions;
+using System.Net.Http.Headers;
+using System.Text;
+using Velopack;
 
 namespace Baka;
 
@@ -35,9 +35,56 @@ static class App
         ? new Icon(new MemoryStream(ico)) : SystemIcons.Application;
 
     static string? _logo;
+    public const string HomeBackgroundHost = "baka-assets.local";
+    public static string HomeBackgroundDirectory => Path_("home-assets");
     /// The same mark as a data: URI for the new-tab page. Built on first use and shared by every tab.
     public static string Logo => _logo ??=
         Resource("baka-logo.png") is { } png ? "data:image/png;base64," + Convert.ToBase64String(png) : "";
+
+    public static string HomeBackgroundUrl
+    {
+        get
+        {
+            var name = Config.Current.HomeBackgroundFile;
+            if (!IsHomeBackgroundName(name) || !File.Exists(Path.Combine(HomeBackgroundDirectory, name))) return "";
+            return $"https://{HomeBackgroundHost}/{Uri.EscapeDataString(name)}";
+        }
+    }
+
+    public static bool HomeBackgroundIsVideo =>
+        Path.GetExtension(Config.Current.HomeBackgroundFile).ToLowerInvariant() is ".mp4" or ".webm" or ".m4v";
+
+    public static bool IsHomeBackgroundName(string? name) => name is
+        "home-background.png" or "home-background.jpg" or "home-background.jpeg" or
+        "home-background.mp4" or "home-background.webm" or "home-background.m4v";
+
+    public static void MigrateLegacyHomeBackground(string name)
+    {
+        if (!IsHomeBackgroundName(name)) return;
+        try
+        {
+            var oldPath = Path_(name);
+            var newPath = Path.Combine(HomeBackgroundDirectory, name);
+            if (!File.Exists(oldPath) || File.Exists(newPath)) return;
+            Directory.CreateDirectory(HomeBackgroundDirectory);
+            File.Copy(oldPath, newPath);
+        }
+        catch { /* a missing or locked wallpaper falls back to the built-in dashboard background */ }
+    }
+
+    public static string CustomCursorDataUri
+    {
+        get
+        {
+            if (!Config.Current.CustomCursorEnabled) return "";
+            try
+            {
+                var bytes = File.ReadAllBytes(Path_("custom-cursor.cur"));
+                return bytes.Length is > 0 and <= 65_536 ? "data:image/x-icon;base64," + Convert.ToBase64String(bytes) : "";
+            }
+            catch { return ""; }
+        }
+    }
 
     static byte[]? Resource(string name)
     {
@@ -51,6 +98,7 @@ static class App
     [STAThread]
     static int Main(string[] args)
     {
+        VelopackApp.Build().Run();
         Directory.CreateDirectory(DataDir);
         Args.Set(args);
         if (Args.Has("--self-check")) return SelfCheck.Run();
@@ -58,11 +106,21 @@ static class App
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+        Config.Load();
         // The controls we don't draw ourselves — scrollbars, the combo boxes and the spinner in Settings —
         // are themed by the OS. Without this they come up in the light theme: a white stripe down a dark
         // sheet. One line beats owner-drawing three more controls.
-        Application.SetColorMode(SystemColorMode.Dark);
-        Application.Run(new BrowserForm(Args.Urls));
+        Application.SetColorMode(Theme.DarkMode ? SystemColorMode.Dark : SystemColorMode.System);
+        if (!Args.Has("--private"))
+        {
+            if (!ProfileProtection.Apply(App.DataDir, Config.Current.EncryptProfileAtRest, out var protectionError))
+                MessageBox.Show(
+                    $"Windows could not {(Config.Current.EncryptProfileAtRest ? "encrypt" : "decrypt")} the browser profile. " +
+                    $"The browser will continue using the profile in its current state.\n\n{protectionError}\n\n" +
+                    "Check that the profile is closed in other browser processes and that this drive supports Windows file encryption.",
+                    App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        Application.Run(new BrowserForm(Args.Urls, Args.Has("--private")));
         return 0;
     }
 }
@@ -70,18 +128,34 @@ static class App
 sealed class Config
 {
     public string TrackingPrevention { get; set; } = "Strict";
-    public double IdleMinutes { get; set; } = 5;
+    public double IdleMinutes { get; set; } = 2;
     public string SearchUrl { get; set; } = "https://duckduckgo.com/?q={q}";
     public bool ShowBookmarksBar { get; set; } = true;
-
-    /// key -> the id WebView2 assigned the extension, so Settings can deep-link its options page.
-    public Dictionary<string, string> ExtensionIds { get; set; } = [];
-    /// key -> whether the user left it on. Re-applied at every launch.
-    public Dictionary<string, bool> ExtensionOn { get; set; } = [];
-    /// key -> show a toolbar button for it.
-    public Dictionary<string, bool> ExtensionPinned { get; set; } = [];
-    /// Extensions the user added themselves. The bundled two are in code, not here.
-    public List<ExtraExtension> Extra { get; set; } = [];
+    public string BookmarksPosition { get; set; } = "Left";
+    public bool BookmarksCollapsed { get; set; }
+    public string TabsPosition { get; set; } = "Left";
+    public bool TabsCollapsed { get; set; }
+    public string UserAgent { get; set; } = "";
+    public bool JavaScriptEnabled { get; set; } = true;
+    public bool ImagesEnabled { get; set; } = true;
+    public bool BuiltInBlockingEnabled { get; set; } = true;
+    public bool SendPrivacySignals { get; set; } = true;
+    public string ThemeMode { get; set; } = "Dark";
+    public string AccentColor { get; set; } = "#0A84FF";
+    public string CustomBackgroundColor { get; set; } = "#30243B";
+    public bool LiquidGlassEnabled { get; set; } = true;
+    public bool RestoreLastSession { get; set; } = true;
+    public List<string> LastSessionTabs { get; set; } = [];
+    public int LastActiveTabIndex { get; set; }
+    public bool AutoUpdateEnabled { get; set; } = true;
+    public bool EncryptProfileAtRest { get; set; }
+    public List<string> CustomBlockedDomains { get; set; } = [];
+    public List<string> AllowedDomains { get; set; } = [];
+    public string HomeBackgroundFile { get; set; } = "";
+    public bool CustomCursorEnabled { get; set; }
+    public string DashboardNotes { get; set; } = "";
+    public List<DashboardTask> DashboardTasks { get; set; } = [];
+    public List<string> DashboardWidgets { get; set; } = ["clock", "quicklinks", "notes", "tasks", "privacy"];
 
     [JsonIgnore] public static Config Current { get; private set; } = new();
 
@@ -94,14 +168,193 @@ sealed class Config
             if (File.Exists(File_))
                 Current = JsonSerializer.Deserialize<Config>(File.ReadAllText(File_)) ?? new Config();
         }
-        catch { Current = new Config(); }
+        catch
+        {
+            try { if (File.Exists(File_)) File.Copy(File_, File_ + ".corrupt", overwrite: true); } catch { }
+            Current = new Config();
+        }
+
+        if (Current.ThemeMode is not ("Dark" or "Light" or "Custom")) Current.ThemeMode = "Dark";
+        if (!System.Text.RegularExpressions.Regex.IsMatch(Current.AccentColor ?? "", "^#[0-9A-Fa-f]{6}$"))
+            Current.AccentColor = "#0A84FF";
+        if (!System.Text.RegularExpressions.Regex.IsMatch(Current.CustomBackgroundColor ?? "", "^#[0-9A-Fa-f]{6}$"))
+            Current.CustomBackgroundColor = "#30243B";
+        if (Current.BookmarksPosition is not ("Left" or "Top")) Current.BookmarksPosition = "Left";
+        if (Current.TabsPosition is not ("Left" or "Top")) Current.TabsPosition = "Left";
+        Current.LastSessionTabs = (Current.LastSessionTabs ?? [])
+            .Where(IsRestorableSessionUrl).TakeLast(50).ToList();
+        if (Current.LastActiveTabIndex < 0 || Current.LastActiveTabIndex >= Current.LastSessionTabs.Count)
+            Current.LastActiveTabIndex = Math.Max(0, Current.LastSessionTabs.Count - 1);
+        if (Current.UserAgent is null || Current.UserAgent.Length > 512 || Current.UserAgent.Any(char.IsControl))
+            Current.UserAgent = "";
+        if (!Engines.IsValidTemplate(Current.SearchUrl))
+            Current.SearchUrl = "https://duckduckgo.com/?q={q}";
+        if (Current.TrackingPrevention is not ("Strict" or "Balanced" or "Basic" or "Off"))
+            Current.TrackingPrevention = "Strict";
         if (Args.Number("--idle-minutes=") is { } m) Current.IdleMinutes = m;   // test/debug override
+        if (!double.IsFinite(Current.IdleMinutes) || Current.IdleMinutes is < 0 or > 600) Current.IdleMinutes = 2;
+        Current.CustomBlockedDomains = PrivacyRules.NormalizeDomains(Current.CustomBlockedDomains ?? []);
+        Current.AllowedDomains = PrivacyRules.NormalizeDomains(Current.AllowedDomains ?? []);
+        if (!App.IsHomeBackgroundName(Current.HomeBackgroundFile)) Current.HomeBackgroundFile = "";
+        else App.MigrateLegacyHomeBackground(Current.HomeBackgroundFile);
+        if (Current.DashboardNotes is null || Current.DashboardNotes.Length > 4000) Current.DashboardNotes = "";
+        Current.DashboardTasks = (Current.DashboardTasks ?? []).Where(t => t is not null && !string.IsNullOrWhiteSpace(t.Text))
+            .Take(40).Select(t => new DashboardTask(t.Text.Length > 140 ? t.Text[..140] : t.Text, t.Done)).ToList();
+        var validWidgets = new HashSet<string>(["clock", "quicklinks", "notes", "tasks", "privacy"], StringComparer.Ordinal);
+        Current.DashboardWidgets = (Current.DashboardWidgets ?? [])
+            .Where(w => validWidgets.Contains(w)).Distinct(StringComparer.Ordinal).ToList();
     }
 
     public void Save()
     {
-        try { File.WriteAllText(File_, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true })); }
+        try
+        {
+            Directory.CreateDirectory(App.DataDir);
+            var temp = File_ + ".tmp";
+            File.WriteAllText(temp, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+            File.Move(temp, File_, overwrite: true);
+        }
         catch { }
+    }
+
+    static bool IsRestorableSessionUrl(string? url)
+    {
+        if (url == "") return true; // the browser's home tab
+        if (string.IsNullOrWhiteSpace(url) || url.Length > 4096 || !Uri.TryCreate(url, UriKind.Absolute, out var uri))
+            return false;
+        return uri.Scheme is "http" or "https" or "file";
+    }
+}
+
+sealed record DashboardTask(string Text, bool Done);
+
+/// Host-only rules keep the request matcher small and predictable. Imported lists are capped so each
+/// WebView does not accumulate an unbounded number of native request filters.
+static class PrivacyRules
+{
+    public const int CustomLimit = 500;
+    public const int RecommendedListLimit = 120_000;
+    const int MaxRecommendedListBytes = 12 * 1024 * 1024;
+    const string RecommendedHostsUrl = "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts";
+    static readonly string RecommendedHostsPath = App.Path_("recommended-hosts.txt");
+    static readonly HttpClient RecommendedListClient = CreateRecommendedListClient();
+    static HashSet<string> _downloadedDomains = new(StringComparer.OrdinalIgnoreCase);
+
+    public static IReadOnlyCollection<string> DownloadedDomains => _downloadedDomains;
+    public static int DownloadedDomainCount => _downloadedDomains.Count;
+
+    static HttpClient CreateRecommendedListClient()
+    {
+        var client = new HttpClient { Timeout = TimeSpan.FromSeconds(45) };
+        client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("BakaBrowser", "1.0"));
+        return client;
+    }
+
+    public static void LoadDownloadedBlocklist()
+    {
+        try
+        {
+            _downloadedDomains = File.Exists(RecommendedHostsPath) &&
+                new FileInfo(RecommendedHostsPath).Length <= MaxRecommendedListBytes
+                ? new HashSet<string>(ParseHostsText(File.ReadAllText(RecommendedHostsPath), RecommendedListLimit), StringComparer.OrdinalIgnoreCase)
+                : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        }
+        catch { _downloadedDomains = new HashSet<string>(StringComparer.OrdinalIgnoreCase); }
+    }
+
+    /// Downloads only after an explicit user action and keeps a validated local copy for later launches.
+    public static async Task<int> UpdateRecommendedBlocklistAsync()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+        using var response = await RecommendedListClient.GetAsync(
+            RecommendedHostsUrl, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+        response.EnsureSuccessStatusCode();
+        if (response.Content.Headers.ContentLength is > MaxRecommendedListBytes)
+            throw new InvalidDataException("The recommended list is larger than the 12 MB safety limit.");
+
+        await using var input = await response.Content.ReadAsStreamAsync(timeout.Token);
+        using var output = new MemoryStream();
+        var buffer = new byte[32 * 1024];
+        while (true)
+        {
+            var read = await input.ReadAsync(buffer, timeout.Token);
+            if (read == 0) break;
+            if (output.Length + read > MaxRecommendedListBytes)
+                throw new InvalidDataException("The recommended list is larger than the 12 MB safety limit.");
+            output.Write(buffer, 0, read);
+        }
+
+        var parsed = ParseHostsText(Encoding.UTF8.GetString(output.ToArray()), RecommendedListLimit);
+        if (parsed.Count < 1_000)
+            throw new InvalidDataException("The downloaded list did not contain enough valid domains. Your current list was kept.");
+
+        Directory.CreateDirectory(App.DataDir);
+        var tempPath = RecommendedHostsPath + ".tmp-" + Guid.NewGuid().ToString("N");
+        try
+        {
+            await File.WriteAllLinesAsync(tempPath, parsed.Select(domain => "0.0.0.0 " + domain));
+            File.Move(tempPath, RecommendedHostsPath, overwrite: true);
+        }
+        finally { try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { } }
+        _downloadedDomains = new HashSet<string>(parsed, StringComparer.OrdinalIgnoreCase);
+        return _downloadedDomains.Count;
+    }
+
+    public static void ClearDownloadedBlocklist()
+    {
+        if (File.Exists(RecommendedHostsPath)) File.Delete(RecommendedHostsPath);
+        _downloadedDomains = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    }
+
+    public static List<string> NormalizeDomains(IEnumerable<string> domains, int limit = CustomLimit) => domains
+        .Select(NormalizeDomain).Where(d => d is not null).Select(d => d!)
+        .Distinct(StringComparer.OrdinalIgnoreCase).Take(Math.Clamp(limit, 1, RecommendedListLimit)).ToList();
+
+    public static List<string> ParseHostsText(string content, int limit = CustomLimit)
+    {
+        var result = new List<string>();
+        var safeLimit = Math.Clamp(limit, 1, RecommendedListLimit);
+        foreach (var raw in content.Split(['\r', '\n', ',', ';'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            var line = raw.Trim();
+            if (line.Length == 0 || line.StartsWith('#') || line.StartsWith('!')) continue;
+            if (line.StartsWith("||", StringComparison.Ordinal))
+            {
+                var rule = line[2..].Split(['^', '$', '|', '/'], 2)[0];
+                if (NormalizeDomain(rule) is { } domain) result.Add(domain);
+            }
+            else
+            {
+                var comment = line.IndexOf('#');
+                if (comment >= 0) line = line[..comment].TrimEnd();
+                var tokens = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+                if (tokens.Length > 1 && (tokens[0] is "0.0.0.0" or "127.0.0.1" or "::" or "::1"))
+                {
+                    foreach (var token in tokens.Skip(1))
+                        if (NormalizeDomain(token) is { } domain) result.Add(domain);
+                }
+                else if (tokens.Length == 1 && NormalizeDomain(tokens[0]) is { } domain) result.Add(domain);
+            }
+            if (result.Count >= safeLimit) break;
+        }
+        return NormalizeDomains(result, safeLimit);
+    }
+
+    static string? NormalizeDomain(string? input)
+    {
+        if (string.IsNullOrWhiteSpace(input)) return null;
+        var value = input.Trim().TrimEnd('.');
+        if (value.StartsWith("||", StringComparison.Ordinal)) value = value[2..].TrimEnd('^', '*', '|', '/');
+        if (value.StartsWith("*.", StringComparison.Ordinal)) value = value[2..];
+        if (value.StartsWith('.')) value = value[1..];
+        try { value = new System.Globalization.IdnMapping().GetAscii(value).ToLowerInvariant(); }
+        catch { return null; }
+        if (value.Length is < 4 or > 253 || !value.Contains('.') ||
+            System.Net.IPAddress.TryParse(value, out _) || value.Any(c => !(char.IsAsciiLetterOrDigit(c) || c is '.' or '-')))
+            return null;
+        var labels = value.Split('.');
+        return labels.All(l => l.Length is > 0 and <= 63 && char.IsAsciiLetterOrDigit(l[0]) &&
+            char.IsAsciiLetterOrDigit(l[^1]) && l.All(c => char.IsAsciiLetterOrDigit(c) || c == '-')) ? value : null;
     }
 }
 
@@ -119,6 +372,13 @@ static class Engines
     ];
 
     public const string Custom = "Custom";
+
+    public static bool IsValidTemplate(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length > 4096 || !value.Contains("{q}", StringComparison.Ordinal)) return false;
+        var sample = value.Replace("{q}", "query", StringComparison.Ordinal);
+        return Uri.TryCreate(sample, UriKind.Absolute, out var uri) && (uri.Scheme is "http" or "https") && uri.Host.Length > 0;
+    }
 
     public static string NameOf(string url) =>
         All.FirstOrDefault(e => e.Url == url).Name ?? Custom;
@@ -142,14 +402,22 @@ static class Bookmarks
         try
         {
             if (File.Exists(File_))
-                All = JsonSerializer.Deserialize<List<Bookmark>>(File.ReadAllText(File_)) ?? [];
+                All = [.. (JsonSerializer.Deserialize<List<Bookmark>>(File.ReadAllText(File_)) ?? [])
+                    .Where(b => b is not null && !string.IsNullOrWhiteSpace(b.Url))
+                    .Select(b => b with { Title = b.Title ?? b.Url })];
         }
         catch { All = []; }
     }
 
     static void Save()
     {
-        try { File.WriteAllText(File_, JsonSerializer.Serialize(All, new JsonSerializerOptions { WriteIndented = true })); }
+        try
+        {
+            Directory.CreateDirectory(App.DataDir);
+            var temp = File_ + ".tmp";
+            File.WriteAllText(temp, JsonSerializer.Serialize(All, new JsonSerializerOptions { WriteIndented = true }));
+            File.Move(temp, File_, overwrite: true);
+        }
         catch { }
     }
 
@@ -181,7 +449,7 @@ static class History
 
     public static List<Visit> All { get; } = [];
 
-    /// about:, data: and chrome-extension: pages are plumbing, not places you went.
+    /// Internal pages are plumbing, not places you went.
     public static bool Worth(string url) =>
         url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
         url.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
@@ -189,19 +457,39 @@ static class History
     public static void Load()
     {
         All.Clear();
+        var latest = new Queue<Visit>(Cap);
+        var trimmed = false;
         try
         {
             foreach (var line in File.ReadLines(File_))
-                if (line.Length > 2 && JsonSerializer.Deserialize<Visit>(line) is { } v) All.Add(v);
+            {
+                if (line.Length <= 2) continue;
+                try
+                {
+                    if (JsonSerializer.Deserialize<Visit>(line) is not { } v ||
+                        string.IsNullOrWhiteSpace(v.Url) || !Worth(v.Url)) continue;
+                    if (latest.Count == Cap) { latest.Dequeue(); trimmed = true; }
+                    latest.Enqueue(v with { Title = v.Title ?? v.Url });
+                }
+                catch { /* skip one damaged record and continue reading the rest of the history */ }
+            }
         }
         catch { }
-        if (All.Count > Cap) { All.RemoveRange(0, All.Count - Cap); Rewrite(); }
+        All.AddRange(latest);
+        if (trimmed) Rewrite();
     }
 
     public static void Add(string url, string title)
     {
         if (!Worth(url)) return;
         if (All.Count > 0 && All[^1].Url == url) return;      // a reload is not a second visit
+        if (All.Count >= Cap)
+        {
+            All.RemoveRange(0, All.Count - Cap + 1);
+            All.Add(new Visit(url, title, DateTime.Now));
+            Rewrite();
+            return;
+        }
         All.Add(new Visit(url, title, DateTime.Now));
         try { File.AppendAllText(File_, JsonSerializer.Serialize(All[^1]) + "\n"); } catch { }
     }
@@ -217,7 +505,13 @@ static class History
     /// Titles fixed up by Touch only reach the file here, on the way out.
     public static void Rewrite()
     {
-        try { File.WriteAllLines(File_, All.Select(v => JsonSerializer.Serialize(v))); } catch { }
+        try
+        {
+            var temp = File_ + ".tmp";
+            File.WriteAllLines(temp, All.Select(v => JsonSerializer.Serialize(v)));
+            File.Move(temp, File_, overwrite: true);
+        }
+        catch { }
     }
 }
 
@@ -256,258 +550,6 @@ static class Flags
     }
 }
 
-/// One bundled extension: where to get it and what to call it in the UI.
-sealed record ExtensionSource(string Key, string Display, string Blurb, string Url, bool IsCrx);
-
-/// An extension the user added: from the Web Store (Dir is ours) or a folder of their own (Dir is theirs).
-sealed record ExtraExtension(string Key, string Name, string Dir);
-
-/// Anything installed, bundled or not, as the rest of the app wants to see it.
-sealed record Installed(string Key, string Display, string Blurb, string Dir, bool Bundled);
-
-/// What the app needs out of a manifest.json.
-sealed record ManifestInfo(string Name, int Version, string? Popup, string? Options, string? Icon,
-    string[] Permissions, string? NewTab);
-
-/// Downloads and unpacks the extensions that ship enabled by default.
-static class Extensions
-{
-    // Pinned fallback. uBOL's real URL is resolved from GitHub's latest release at startup so its
-    // MV3 rule sets don't go stale; the Web Store CRX endpoint always serves the current build.
-    const string UbolFallback =
-        "https://github.com/uBlockOrigin/uBOL-home/releases/download/2026.901.1442/uBOLite_2026.901.1442.edge.zip";
-
-    /// The unauthenticated CRX endpoint the Web Store itself uses. prodversion picks the build the
-    /// store serves for; it has to be at least our Chromium's or we get an older package.
-    public static string CrxUrl(string id) =>
-        "https://clients2.google.com/service/update2/crx?response=redirect&prodversion=152.0" +
-        $"&acceptformat=crx2,crx3&x=id%3D{id}%26uc";
-
-    public static readonly ExtensionSource[] Bundled =
-    [
-        new("ubol", "uBlock Origin Lite", "Blocks ads and ad domains", UbolFallback, IsCrx: false),
-        new("privacybadger", "Privacy Badger", "Blocks trackers that follow you",
-            CrxUrl("pkehgijcmpdhfbdbbnkijodmdjhbjlgp"), IsCrx: true),
-    ];
-
-    public static string DirFor(string key) => App.Path_("extensions", key);
-    public static bool IsUnpacked(string key) => File.Exists(Path.Combine(DirFor(key), "manifest.json"));
-
-    public static IEnumerable<Installed> All() =>
-        Bundled.Select(b => new Installed(b.Key, b.Display, b.Blurb, DirFor(b.Key), true))
-            .Concat(Config.Current.Extra.Select(e =>
-                new Installed(e.Key, e.Name, e.Dir.StartsWith(App.DataDir) ? "Chrome Web Store" : e.Dir, e.Dir, false)));
-
-    /// A Web Store link or a bare id -> the 32-letter id. Store ids are always a-p.
-    public static string? StoreId(string input) =>
-        Regex.Match(input.Trim(), "[a-p]{32}") is { Success: true } m ? m.Value : null;
-
-
-    /// Applies any update staged as "<key>.new" by a previous run. Must run before the engine loads
-    /// the folders, because a live extension directory cannot be replaced.
-    public static void ApplyStagedUpdates()
-    {
-        foreach (var src in Bundled)
-        {
-            var staged = DirFor(src.Key) + ".new";
-            if (!File.Exists(Path.Combine(staged, "manifest.json"))) continue;
-            try
-            {
-                if (Directory.Exists(DirFor(src.Key))) Directory.Delete(DirFor(src.Key), true);
-                Directory.Move(staged, DirFor(src.Key));
-            }
-            catch { /* still in use; try again next launch */ }
-        }
-    }
-
-    public static async Task<string?> FetchAsync(ExtensionSource src, bool staged)
-    {
-        var target = DirFor(src.Key) + (staged ? ".new" : "");
-        try
-        {
-            using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(3) };
-            http.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0");
-            var url = src.Key == "ubol" ? await ResolveUbolAsync(http) ?? src.Url : src.Url;
-            var bytes = await http.GetByteArrayAsync(url);
-
-            if (Directory.Exists(target)) Directory.Delete(target, true);
-            Directory.CreateDirectory(target);
-            using var zip = new MemoryStream(src.IsCrx ? StripCrxHeader(bytes) : bytes);
-            new ZipArchive(zip, ZipArchiveMode.Read).ExtractToDirectory(target, overwriteFiles: true);
-
-            if (!File.Exists(Path.Combine(target, "manifest.json")))
-                return "downloaded package had no manifest.json";
-            CutUpdateUrl(target);
-            return null;
-        }
-        catch (Exception ex)
-        {
-            Scrub(target);
-            return ex.Message;
-        }
-    }
-
-    static void Scrub(string dir)
-    {
-        try { if (Directory.Exists(dir)) Directory.Delete(dir, true); } catch { }
-    }
-
-    /// WebView2 hosts no chrome.proxy at all, so a VPN or proxy extension installs, enables, and then
-    /// sits there failing inside its own popup ("try again") with nothing the app can do about it.
-    /// Nor can the app route around it: --proxy-server is documented as a WebView2 flag and does reach
-    /// the engine's command line, but WebView2 152 ignores it — with a listener on the proxy address,
-    /// not one connection arrives and pages load direct. Tested, not assumed. What does work is a VPN
-    /// client that routes at the network adapter, which is below the browser and needs nothing from it.
-    /// Short enough for one row: the row is ~280 px once the buttons take their share. The long version
-    /// is in the install prompt, where there is room for it.
-    public const string NoProxy = "No proxy support in WebView2. Use a VPN app.";
-
-    public static bool Proxies(ManifestInfo? m) => m?.Permissions.Contains("proxy") == true;
-
-    /// A Web Store package carries the store's own update_url, so Chromium re-checks it against Google
-    /// every few hours. --disable-background-networking blocks that, so the check fails and lands in the
-    /// download list as a broken .crx — a phone-home we don't want and a failure we don't need. Ours are
-    /// updated by "Update extensions" instead, so the key comes out of the unpacked copy.
-    internal static void CutUpdateUrl(string dir)
-    {
-        var path = Path.Combine(dir, "manifest.json");
-        try
-        {
-            if (JsonNode.Parse(File.ReadAllText(path)) is not JsonObject o || !o.Remove("update_url")) return;
-            File.WriteAllText(path, o.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
-        }
-        catch { /* unparseable or read-only: leave it exactly as it came */ }
-    }
-
-    /// Downloads a Web Store extension into extensions/&lt;id&gt;/ and vets it. The caller still has to
-    /// hand the folder to the profile — this only puts a trustworthy unpacked copy on disk.
-    public static async Task<(string? Key, string? Error)> InstallStoreAsync(string idOrUrl)
-    {
-        if (StoreId(idOrUrl) is not { } id)
-            return (null, "That is not a Chrome Web Store link or a 32-letter extension id.");
-        var dir = DirFor(id);
-        try
-        {
-            using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(3) };
-            http.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0");
-            var bytes = await http.GetByteArrayAsync(CrxUrl(id));
-            Scrub(dir);
-            Directory.CreateDirectory(dir);
-            using var zip = new MemoryStream(StripCrxHeader(bytes));
-            // ExtractToDirectory refuses entries that resolve outside the destination, so a zip-slip
-            // package fails here rather than writing over the profile.
-            new ZipArchive(zip, ZipArchiveMode.Read).ExtractToDirectory(dir, overwriteFiles: true);
-        }
-        catch (Exception ex) { Scrub(dir); return (null, ex.Message); }
-
-        if (ReadManifest(dir) is not { } m) { Scrub(dir); return (null, "the package has no readable manifest.json"); }
-        if (m.Version < 3)
-        {
-            Scrub(dir);
-            return (null, $"\"{m.Name}\" is a Manifest V2 extension. This engine only loads V3.");
-        }
-        CutUpdateUrl(dir);
-        return (id, null);
-    }
-
-    static async Task<string?> ResolveUbolAsync(HttpClient http)
-    {
-        try
-        {
-            http.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
-            using var doc = JsonDocument.Parse(
-                await http.GetStringAsync("https://api.github.com/repos/uBlockOrigin/uBOL-home/releases/latest"));
-            // the .edge build is the one matched to the Chromium flavour WebView2 runs
-            return doc.RootElement.GetProperty("assets").EnumerateArray()
-                .Select(a => a.GetProperty("browser_download_url").GetString())
-                .FirstOrDefault(u => u?.EndsWith(".edge.zip") == true);
-        }
-        catch { return null; }
-    }
-
-    /// CRX3 = "Cr24" | uint32 version | uint32 headerLength | header | zip
-    internal static byte[] StripCrxHeader(byte[] crx)
-    {
-        if (crx.Length < 16 || crx[0] != 'C' || crx[1] != 'r' || crx[2] != '2' || crx[3] != '4')
-            return crx;                                        // already a plain zip
-        var headerLen = BitConverter.ToUInt32(crx, 8);
-        // compared as long: a hostile 4 GB length must not overflow into a valid-looking offset
-        if (headerLen == 0 || headerLen > crx.Length - 12L)
-            throw new InvalidDataException("CRX header length out of range");
-        return crx[(12 + (int)headerLen)..];
-    }
-
-    /// Everything the UI needs from an unpacked extension: display name, whether the engine will load
-    /// it at all, its popup and options pages, an icon to pin, and what it asked for.
-    public static ManifestInfo? ReadManifest(string dir)
-    {
-        try
-        {
-            using var doc = JsonDocument.Parse(File.ReadAllText(Path.Combine(dir, "manifest.json")));
-            var r = doc.RootElement;
-            var name = Str(r, "name") ?? "Extension";
-            if (name.StartsWith("__MSG_") && name.EndsWith("__"))
-                name = Message(dir, Str(r, "default_locale") ?? "en", name[6..^2]) ?? name;
-            var action = r.TryGetProperty("action", out var a) ? a
-                       : r.TryGetProperty("browser_action", out var b) ? b : default;
-            return new ManifestInfo(
-                name,
-                r.TryGetProperty("manifest_version", out var mv) && mv.TryGetInt32(out var v) ? v : 2,
-                Str(action, "default_popup")?.TrimStart('/'),
-                (Str(r, "options_page") ?? (r.TryGetProperty("options_ui", out var ui) ? Str(ui, "page") : null))
-                    ?.TrimStart('/'),
-                Icon(r, action),
-                Perms(r),
-                r.TryGetProperty("chrome_url_overrides", out var ov) ? Str(ov, "newtab")?.TrimStart('/') : null);
-        }
-        catch { return null; }
-    }
-
-    static string? Str(JsonElement e, string name) =>
-        e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var p) &&
-        p.ValueKind == JsonValueKind.String ? p.GetString() : null;
-
-    /// "__MSG_extName__" is an i18n placeholder; the real name is in _locales/<locale>/messages.json.
-    static string? Message(string dir, string locale, string key)
-    {
-        foreach (var loc in new[] { locale, "en", "en_US" })
-            try
-            {
-                using var doc = JsonDocument.Parse(
-                    File.ReadAllText(Path.Combine(dir, "_locales", loc, "messages.json")));
-                if (doc.RootElement.TryGetProperty(key, out var entry) && Str(entry, "message") is { } m) return m;
-            }
-            catch { }
-        return null;
-    }
-
-    /// Whichever declared icon is closest to the 32 px we draw at.
-    static string? Icon(JsonElement root, JsonElement action)
-    {
-        foreach (var owner in new[] { action, root })
-        {
-            if (owner.ValueKind != JsonValueKind.Object) continue;
-            var set = owner.TryGetProperty("default_icon", out var d) ? d
-                    : owner.TryGetProperty("icons", out var i) ? i : default;
-            if (set.ValueKind == JsonValueKind.String) return set.GetString()!.TrimStart('/');
-            if (set.ValueKind != JsonValueKind.Object) continue;
-            if (set.EnumerateObject().Where(p => p.Value.ValueKind == JsonValueKind.String)
-                   .OrderBy(p => int.TryParse(p.Name, out var n) ? Math.Abs(n - 32) : 999)
-                   .FirstOrDefault() is { Value.ValueKind: JsonValueKind.String } best)
-                return best.Value.GetString()!.TrimStart('/');
-        }
-        return null;
-    }
-
-    /// What the extension will be able to do, for the install prompt.
-    static string[] Perms(JsonElement r) =>
-        [.. new[] { "permissions", "host_permissions" }
-            .SelectMany(k => r.TryGetProperty(k, out var arr) && arr.ValueKind == JsonValueKind.Array
-                ? arr.EnumerateArray().Select(x => x.GetString() ?? "")
-                : Enumerable.Empty<string>())
-            .Where(s => s.Length > 0).Distinct()];
-}
-
 static class SelfCheck
 {
     // WinExe has no console; borrow the launching terminal's so `--self-check` is usable from a shell.
@@ -532,8 +574,6 @@ static class SelfCheck
         Check(Url.From("2+2", search) == "https://duckduckgo.com/?q=2%2B2", "no dot, no space -> escaped search");
         Check(Url.From("  ", search) == "about:blank", "blank input");
         Check(Url.From("mailto:a@b.com", search) == "mailto:a@b.com", "non-web scheme passed through");
-        Check(Url.From("chrome-extension://abc/x.html", search) == "chrome-extension://abc/x.html",
-            "extension pages are navigable");
 
         // The address bar's security mark. A padlock on an http page would be a lie, so it gets a test.
         Check(OmniBox.Mark("https://example.com") == Theme.Lock, "https shows the padlock");
@@ -576,62 +616,8 @@ static class SelfCheck
                 "the new-tab + is at least a 24 px target");
         }
 
-        // CRX3 unwrapping: 12-byte prefix + declared header, then the zip
-        var crx = new byte[] { (byte)'C', (byte)'r', (byte)'2', (byte)'4', 3, 0, 0, 0, 2, 0, 0, 0, 0xAA, 0xBB, 1, 2, 3 };
-        Check(Extensions.StripCrxHeader(crx).SequenceEqual<byte>([1, 2, 3]), "CRX3 header stripped");
-        var plain = new byte[] { (byte)'P', (byte)'K', 3, 4, 9 };
-        Check(Extensions.StripCrxHeader(plain).SequenceEqual(plain), "plain zip passed through untouched");
-        // header length claims 2 GB inside a 20-byte file: must throw, not wrap around into a valid offset
-        var bad = new byte[20];
-        "Cr24"u8.CopyTo(bad);
-        BitConverter.GetBytes(0x7FFFFFFFu).CopyTo(bad, 8);
-        try { Extensions.StripCrxHeader(bad); Check(false, "absurd CRX header length rejected"); }
-        catch (InvalidDataException) { Check(true, "absurd CRX header length rejected"); }
-
-        Check(Extensions.StoreId("https://chromewebstore.google.com/detail/x/ddkjiahejlhfcafbddmgiahcphecmpfh")
-              == "ddkjiahejlhfcafbddmgiahcphecmpfh", "store id pulled out of a Web Store link");
-        Check(Extensions.StoreId(" pkehgijcmpdhfbdbbnkijodmdjhbjlgp ") == "pkehgijcmpdhfbdbbnkijodmdjhbjlgp",
-            "bare id accepted");
-        Check(Extensions.StoreId("https://example.com/downloads/thing.zip") is null, "junk is not an id");
-
         Check(History.Worth("https://example.com/page"), "http(s) pages are remembered");
         Check(!History.Worth("about:blank"), "about:blank is not history");
-        Check(!History.Worth("chrome-extension://abc/newtab.html"), "extension pages are not history");
-
-        var tmp = Directory.CreateTempSubdirectory("baka-check");
-        try
-        {
-            void Manifest(string json) => File.WriteAllText(Path.Combine(tmp.FullName, "manifest.json"), json);
-            Manifest("""
-                {"manifest_version":3,"name":"__MSG_extName__","default_locale":"en",
-                 "action":{"default_popup":"/popup.html","default_icon":{"16":"a.png","32":"b.png","128":"c.png"}},
-                 "options_ui":{"page":"opts.html"},"chrome_url_overrides":{"newtab":"/tab.html"},
-                 "permissions":["storage"],"host_permissions":["<all_urls>"]}
-                """);
-            Directory.CreateDirectory(Path.Combine(tmp.FullName, "_locales", "en"));
-            File.WriteAllText(Path.Combine(tmp.FullName, "_locales", "en", "messages.json"),
-                """{"extName":{"message":"Test Blocker"}}""");
-            var m = Extensions.ReadManifest(tmp.FullName);
-            Check(m?.Name == "Test Blocker", "__MSG__ name resolved from _locales");
-            Check(m?.Popup == "popup.html", "popup path read without its leading slash");
-            Check(m?.Options == "opts.html", "options_ui.page read");
-            Check(m?.Icon == "b.png", "icon closest to 32px chosen");
-            Check(m?.Permissions.Length == 2, "permissions and host_permissions merged for the prompt");
-            Check(m?.NewTab == "tab.html", "chrome_url_overrides.newtab read");
-
-            // update_url has to come out without taking the rest of the manifest with it
-            Manifest("""{"manifest_version":3,"name":"Thing","update_url":"https://clients2.google.com/x"}""");
-            Extensions.CutUpdateUrl(tmp.FullName);
-            Check(Extensions.ReadManifest(tmp.FullName) is { Name: "Thing", Version: 3 }, "manifest survives update_url removal");
-            Check(!File.ReadAllText(Path.Combine(tmp.FullName, "manifest.json")).Contains("update_url"),
-                "update_url stripped so Chromium stops phoning the store");
-
-            Manifest("""{"manifest_version":2,"name":"Old Thing"}""");
-            Check(Extensions.ReadManifest(tmp.FullName) is { Version: 2, Name: "Old Thing" },
-                "manifest v2 spotted so the install can be refused");
-        }
-        finally { tmp.Delete(true); }
-
         Console.WriteLine(fails == 0 ? "all passed" : $"{fails} failed");
         return fails;
     }

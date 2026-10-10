@@ -2,10 +2,9 @@ using System.Diagnostics;
 
 namespace Baka;
 
-/// One flat dark settings dialog. No tabs, no tree, no MVVM — it is four short sections.
+/// One flat settings dialog. No tabs, no tree, no MVVM — just the browser controls users need.
 sealed class SettingsForm : Form
 {
-    readonly BrowserForm _owner;
     readonly Panel _page = new()
     {
         Dock = DockStyle.Fill,
@@ -14,10 +13,20 @@ sealed class SettingsForm : Form
         Padding = new Padding(Theme.S(28), Theme.S(20), Theme.S(28), Theme.S(24)),
     };
     int _y;
+    TextBox? _blockedDomainsBox, _allowedDomainsBox;
+    readonly Func<Task>? _clearSiteData;
+    readonly Func<string, Task<string>>? _installExtension;
+    readonly Func<Task<int>>? _updateRecommendedList;
+    readonly Action? _removeRecommendedList;
 
-    public SettingsForm(BrowserForm owner)
+    public SettingsForm(bool privateBrowsing = false, Func<Task>? clearSiteData = null,
+        Func<string, Task<string>>? installExtension = null, bool extensionsSupported = false,
+        Func<Task<int>>? updateRecommendedList = null, Action? removeRecommendedList = null)
     {
-        _owner = owner;
+        _clearSiteData = clearSiteData;
+        _installExtension = installExtension;
+        _updateRecommendedList = updateRecommendedList;
+        _removeRecommendedList = removeRecommendedList;
         Text = $"{App.Name} settings";
         BackColor = Theme.Content;
         ForeColor = Theme.Text;
@@ -29,34 +38,114 @@ sealed class SettingsForm : Form
         ShowIcon = false;
         Controls.Add(_page);
 
-        Header("Extensions");
-        foreach (var ext in Extensions.All().ToArray()) ExtensionRow(ext);
-        InstallRow();
-        Note("Paste a Chrome Web Store link (or its 32-letter id) to add an extension, or point baka at " +
-             "an unpacked folder. Only Manifest V3 extensions load — Chromium 152 removed V2, which is " +
-             "why the bundled blocker is uBlock Origin Lite, uBlock Origin's own MV3 build. Privacy " +
-             "Badger also sends the Do Not Track and Global Privacy Control signals for you. Pin puts an " +
-             "extension in the toolbar; its button opens the extension's own popup.");
-
         Header("Privacy");
         Dropdown("Tracking prevention", ["Strict", "Balanced", "Basic", "Off"],
             Config.Current.TrackingPrevention, v => Config.Current.TrackingPrevention = v);
-        Note("Strict blocks known trackers in every context. Autofill, password saving, sync, crash " +
-             "reporting and SmartScreen URL reporting are off in all modes.");
+        Toggle("Block known ad and tracker domains", Config.Current.BuiltInBlockingEnabled,
+            v => Config.Current.BuiltInBlockingEnabled = v);
+        Toggle("Send Do Not Track and Global Privacy Control signals", Config.Current.SendPrivacySignals,
+            v => Config.Current.SendPrivacySignals = v);
+        Toggle("Enable JavaScript on websites", Config.Current.JavaScriptEnabled,
+            v => Config.Current.JavaScriptEnabled = v);
+        Toggle("Load images globally", Config.Current.ImagesEnabled,
+            v => Config.Current.ImagesEnabled = v);
+        Note("The built-in host rules block common ad and tracking networks. Do Not Track and Global Privacy Control " +
+             "signals can be toggled above. Add local host rules or site exceptions below. " +
+             "This is host blocking, so it cannot remove page elements or catch ads served from a site's own domain. " +
+             "Tracking prevention adds the engine's own protections. Some sites may rely on blocked " +
+             "services. Autofill, password saving, sync, crash reporting and SmartScreen URL reporting " +
+             "are off in all modes. Disabling JavaScript can " +
+             "disable site scripts; the built-in dashboard stays interactive. Disabling images blocks " +
+             "new image requests; images already shown remain until the page is reloaded.");
+        Buttons(("Update ad & tracker list…", () => _ = UpdateRecommendedListAsync()),
+            ("Remove downloaded list", RemoveRecommendedList));
+        Note("The optional StevenBlack hosts list adds roughly 70,000+ known adware and malware domains. It downloads only when you press Update, is kept on this PC, and is shared by regular and private windows. Updates are provided by the list's GitHub project. Domain lists cannot remove ads served directly by a site or hide ad page elements.");
+        if (!privateBrowsing)
+        {
+            Buttons(("Clear site data…", () => _ = ClearSiteDataAsync()));
+            Note("This removes cookies, local storage, service workers and other site data from the regular profile. It does not clear history or bookmarks.");
+            Toggle("Encrypt browser data with this Windows account (EFS)", Config.Current.EncryptProfileAtRest,
+                v => Config.Current.EncryptProfileAtRest = v);
+            Note("Applies at the next launch to the local profile, history, bookmarks and settings in Local AppData. Windows Encrypting File System protects it at rest for this Windows account. It cannot protect data while your account is unlocked or from a device administrator. Keep your Windows recovery credentials; unsupported drives may reject encryption.");
+        }
+        DomainList("Extra blocked domains", Config.Current.CustomBlockedDomains,
+            v => Config.Current.CustomBlockedDomains = v);
+        DomainList("Allowed domains (include subdomains)", Config.Current.AllowedDomains,
+            v => Config.Current.AllowedDomains = v);
+        Buttons(("Import hosts list…", ImportHostsList), ("Clear custom rules", () =>
+        {
+            Config.Current.CustomBlockedDomains = [];
+            Config.Current.AllowedDomains = [];
+            if (_blockedDomainsBox is not null) _blockedDomainsBox.Text = "";
+            if (_allowedDomainsBox is not null) _allowedDomainsBox.Text = "";
+        }));
+        Note($"Rules are stored locally. Custom block lists accept up to {PrivacyRules.CustomLimit} domains; imported text supports hosts files and one-domain-per-line lists.");
+
+        Header("Appearance");
+        Dropdown("Theme", ["Dark", "Light", "Custom"], Config.Current.ThemeMode,
+            v => Config.Current.ThemeMode = v);
+        Toggle("Liquid-glass browser chrome and dashboard", Config.Current.LiquidGlassEnabled,
+            v => Config.Current.LiquidGlassEnabled = v);
+        Note("Uses the Windows backdrop where available in dark and light themes, with crisp glass-style surfaces and soft edge highlights. Dashboard blur is limited to the new-tab page; video wallpapers stay sharp and avoid extra blur work.");
+        Buttons(("Custom surface color…", ChooseCustomSurface), ("Accent color…", () =>
+        {
+            using var picker = new ColorDialog { Color = Theme.Accent, FullOpen = true };
+            if (picker.ShowDialog(this) != DialogResult.OK) return;
+            Config.Current.AccentColor = $"#{picker.Color.R:X2}{picker.Color.G:X2}{picker.Color.B:X2}";
+        }));
+        Note("Custom keeps the surface and accent colors you choose. The browser applies them after this settings window closes.");
+        Buttons(("Choose image or video…", ChooseBackground), ("Remove background", RemoveBackground));
+        Buttons(("Choose cursor…", ChooseCursor), ("Reset cursor", ResetCustomCursor));
+        Note("New-tab PNG/JPEG images and MP4/WebM videos have no file-size cap and are stored locally. Videos start muted and pause in background tabs. Custom cursors accept Windows .cur files; page cursors require JavaScript on the site.");
 
         Header("Search");
         EnginePicker();
         Note("Anything typed in the address bar that isn't a URL goes to this engine.");
 
+        if (!privateBrowsing)
+        {
+            Header("Extensions");
+            if (extensionsSupported)
+            {
+                Buttons(("Install extension from folder…", ChooseExtensionFolder));
+                Note("Choose an unpacked extension folder containing manifest.json. Chrome Web Store pages and .crx files cannot be installed directly. Extensions can read or change site data according to their permissions, so install only extensions you trust.");
+            }
+            else
+                Note("Extension installation is unavailable because the installed WebView2 runtime does not expose the required extension support. Update the WebView2 Runtime to version 120 or newer to enable it.");
+        }
+
         Header("Bookmarks");
         Toggle("Show the bookmarks bar", Config.Current.ShowBookmarksBar,
             v => Config.Current.ShowBookmarksBar = v);
-        Note("Ctrl+D bookmarks the page you are on, Ctrl+Shift+B hides the bar. On the bar: " +
+        Dropdown("Bookmarks position", ["Left", "Top"], Config.Current.BookmarksPosition,
+            v => Config.Current.BookmarksPosition = v);
+        Note("Use the chevron at the top of the left sidebar to collapse or expand it. Ctrl+D bookmarks the page; Ctrl+Shift+B hides or shows the bar. On the bar: " +
              "middle-click opens in a new tab, right-click removes.");
+
+        Header("Tabs");
+        Dropdown("Tab placement", ["Left", "Top"], Config.Current.TabsPosition,
+            v => Config.Current.TabsPosition = v);
+        Toggle("Restore tabs from the previous session", Config.Current.RestoreLastSession, v =>
+        {
+            Config.Current.RestoreLastSession = v;
+            if (!v) Config.Current.LastSessionTabs = [];
+        });
+        Toggle("Start with the left tab rail collapsed", Config.Current.TabsCollapsed,
+            v => Config.Current.TabsCollapsed = v);
+        Note("When enabled, normal windows reopen up to 50 tabs from the last session and select the tab that was active. Private-window tabs are never saved. Use the chevron above the tab list to collapse or expand the left rail. The top layout keeps the native Windows title bar.");
 
         Header("Performance");
         Spinner("Suspend tabs idle for (minutes, 0 = never)", Config.Current.IdleMinutes,
             v => Config.Current.IdleMinutes = v);
+        Toggle("Check for updates automatically", Config.Current.AutoUpdateEnabled,
+            v => Config.Current.AutoUpdateEnabled = v);
+        Note("After the delay, the browser asks WebView2 to suspend only hidden tabs that are not loading or playing audio. This is best-effort; some pages cannot be suspended. Suspended tabs resume when selected. Updates download quietly and apply at the next launch.");
+
+        Header("Website compatibility");
+        TextField("Custom user agent (blank uses the engine default)", Config.Current.UserAgent,
+            v => Config.Current.UserAgent = v);
+        Note("The user agent takes effect on every open tab after these settings are saved. Some sites may " +
+             "serve different content or reject an unfamiliar value.");
 
         Header("Advanced");
         Buttons(
@@ -65,18 +154,19 @@ sealed class SettingsForm : Form
             {
                 Flags.Load();     // recreates flags.txt from defaults if it went missing
                 Process.Start(new ProcessStartInfo(App.Path_("flags.txt")) { UseShellExecute = true });
-            }),
-            ("Update extensions", UpdateExtensions));
-        Buttons(("Clear history", () =>
-        {
-            if (MessageBox.Show($"Forget all {History.All.Count} pages?", App.Name, MessageBoxButtons.YesNo)
-                == DialogResult.Yes) History.Clear();
-        }));
-        Note($"Settings, flags, history and extensions live in {App.DataDir}. Flag changes need a restart. " +
+            }));
+        if (!privateBrowsing)
+            Buttons(("Clear history", () =>
+            {
+                if (MessageBox.Show($"Forget all {History.All.Count} pages?", App.Name, MessageBoxButtons.YesNo)
+                    == DialogResult.Yes) History.Clear();
+            }));
+        else Note("This private window has no saved history. It cannot clear history from the regular browser profile.");
+        Note($"Settings, flags and history live in {App.DataDir}. Flag changes need a restart. " +
              "Ctrl+H opens history, Ctrl+J the downloads list.");
 
-        FormClosing += (_, _) => Config.Current.Save();
-        // dark frame and rounded corners, but an opaque sheet: notes in Muted grey need a fixed backdrop
+        FormClosing += (_, _) => { if (!privateBrowsing) Config.Current.Save(); };
+        // Rounded native frame, but an opaque sheet so muted notes retain contrast in either theme.
         Shown += (_, _) => Theme.Glass(this, backdrop: false);
     }
 
@@ -109,127 +199,6 @@ sealed class SettingsForm : Form
         }, TextRenderer.MeasureText(text, Theme.Ui,
               new Size(_page.ClientSize.Width - _page.Padding.Horizontal, 0), TextFormatFlags.WordBreak).Height + 4);
 
-    void ExtensionRow(Installed ext)
-    {
-        var failed = _owner.ExtensionErrors.GetValueOrDefault(ext.Key);
-        // an extension can also be perfectly installed and still unable to do its job here
-        var warn = failed is not null ? "Install failed: " + failed
-                 : Extensions.Proxies(Extensions.ReadManifest(ext.Dir)) ? Extensions.NoProxy
-                 : null;
-        var card = new Panel { BackColor = Theme.Fill1 };
-        var check = new CheckBox
-        {
-            Text = ext.Display,
-            Checked = failed is null && Config.Current.ExtensionOn.GetValueOrDefault(ext.Key, true),
-            Enabled = failed is null,
-            ForeColor = Theme.Text,
-            BackColor = Theme.Fill1,
-            Font = Theme.UiBold,
-            AutoSize = false,
-            // 24 px, the desktop minimum for a click target. A CheckBox with AutoSize off is clickable
-            // across the whole bounds, label included, so the width is doing most of the work.
-            Bounds = new Rectangle(Theme.S(12), Theme.S(8), Theme.S(300), Theme.S(24)),
-        };
-        var blurb = new Label
-        {
-            Text = warn ?? ext.Blurb,
-            ForeColor = warn is null ? Theme.Muted : Theme.Bad,
-            BackColor = Theme.Fill1,
-            AutoSize = false,
-            AutoEllipsis = true,   // one line, so a long blurb ends in "…" instead of a cut-off word
-            Bounds = new Rectangle(Theme.S(32), Theme.S(30), Theme.S(300), Theme.S(20)),
-        };
-        var pin = new CheckBox
-        {
-            Text = "Pin",
-            Checked = Config.Current.ExtensionPinned.GetValueOrDefault(ext.Key),
-            Enabled = failed is null,
-            ForeColor = Theme.Text,
-            BackColor = Theme.Fill1,
-            AutoSize = false,
-            Width = Theme.S(48),
-            Height = Theme.S(24),
-        };
-        var options = Flat("Options");
-        options.Size = new Size(Theme.S(74), Theme.S(28));
-        options.Enabled = failed is null && _owner.ExtensionId(ext.Key) is not null;
-        var remove = Flat("Remove");
-        remove.Size = new Size(Theme.S(74), Theme.S(28));
-        remove.Visible = !ext.Bundled;
-
-        check.CheckedChanged += async (_, _) =>
-        {
-            options.Enabled = check.Checked && _owner.ExtensionId(ext.Key) is not null;
-            await _owner.SetExtensionEnabledAsync(ext.Key, check.Checked);
-        };
-        pin.CheckedChanged += (_, _) => _owner.SetExtensionPinned(ext.Key, pin.Checked);
-        options.Click += (_, _) =>
-        {
-            if (_owner.ExtensionId(ext.Key) is not { } id) return;
-            var page = Extensions.ReadManifest(ext.Dir)?.Options ?? "";
-            _owner.OpenTab($"chrome-extension://{id}/{page}");
-            Close();
-        };
-        remove.Click += async (_, _) =>
-        {
-            if (MessageBox.Show($"Remove {ext.Display}?", App.Name, MessageBoxButtons.YesNo) != DialogResult.Yes)
-                return;
-            await _owner.RemoveExtensionAsync(ext.Key);
-            Reopen();
-        };
-
-        card.Controls.AddRange([check, blurb, pin, options, remove]);
-        void Place()
-        {
-            var right = card.ClientSize.Width - Theme.S(12);
-            foreach (var c in new Control[] { remove, options, pin })
-            {
-                if (!c.Visible) continue;
-                right -= c.Width;
-                c.Location = new Point(right, (card.ClientSize.Height - c.Height) / 2);
-                right -= Theme.S(6);
-            }
-            check.Width = Math.Max(Theme.S(80), right - Theme.S(20));
-            blurb.Width = Math.Max(Theme.S(80), right - Theme.S(40));
-        }
-        card.Resize += (_, _) => Place();
-        Add(card, Theme.S(58));
-        Place();
-    }
-
-    /// Web Store link or id, plus a folder picker for anything not in the store.
-    void InstallRow()
-    {
-        var row = new Panel { BackColor = Theme.Content };
-        var box = new TextBox
-        {
-            BorderStyle = BorderStyle.FixedSingle,
-            BackColor = Theme.Fill1,
-            ForeColor = Theme.Text,
-            PlaceholderText = "Chrome Web Store link or extension id",
-            Bounds = new Rectangle(0, Theme.S(3), Theme.S(260), Theme.S(26)),
-        };
-        var install = Flat("Install");
-        install.Bounds = new Rectangle(Theme.S(266), Theme.S(1), Theme.S(92), Theme.S(30));
-        var unpacked = Flat("Load folder…");
-        unpacked.Bounds = new Rectangle(Theme.S(364), Theme.S(1), Theme.S(110), Theme.S(30));
-
-        install.Click += async (_, _) => await InstallStoreAsync(box.Text);
-        unpacked.Click += async (_, _) => await InstallFolderAsync();
-        box.KeyDown += async (_, e) =>
-        {
-            if (e.KeyCode != Keys.Enter) return;
-            e.SuppressKeyPress = true;
-            await InstallStoreAsync(box.Text);
-        };
-
-        row.Controls.AddRange([box, install, unpacked]);
-        Add(row, Theme.S(32));
-    }
-
-    /// A dark dropdown that draws its own items. The stock one clipped the first letter of the closed
-    /// value ("Strict" -> "trict") under Application.SetColorMode's still-experimental dark renderer,
-    /// and owner-drawing is both the fix and one place to keep the colours.
     static ComboBox Combo(int right, IEnumerable<string> values)
     {
         var combo = new ComboBox
@@ -294,12 +263,187 @@ sealed class SettingsForm : Form
         {
             if (syncing) return;
             var v = box.Text.Trim();
-            if (!v.Contains("{q}")) return;               // ignore half-typed URLs, don't fight the caret
+            if (!Engines.IsValidTemplate(v)) return;       // ignore half-typed URLs and non-web schemes
             Config.Current.SearchUrl = v;
             syncing = true;
             combo.SelectedIndex = Array.IndexOf(names, Engines.NameOf(v));
             syncing = false;
         };
+    }
+
+    void DomainList(string label, List<string> domains, Action<List<string>> set)
+    {
+        Add(new Label { Text = label, ForeColor = Theme.Text, AutoSize = false }, Theme.S(20), Theme.S(3));
+        var box = new TextBox
+        {
+            Multiline = true, AcceptsReturn = true, ScrollBars = ScrollBars.Vertical,
+            Text = string.Join(Environment.NewLine, domains), MaxLength = 20_000,
+            BorderStyle = BorderStyle.FixedSingle, BackColor = Theme.Fill1, ForeColor = Theme.Text,
+        };
+        if (label.StartsWith("Extra blocked", StringComparison.Ordinal)) _blockedDomainsBox = box;
+        else _allowedDomainsBox = box;
+        box.TextChanged += (_, _) => set(PrivacyRules.ParseHostsText(box.Text));
+        Add(box, Theme.S(96));
+    }
+
+    void ImportHostsList()
+    {
+        using var picker = new OpenFileDialog { Title = "Import a local hosts or domain list", Filter = "Text lists (*.txt;*.hosts)|*.txt;*.hosts|All files (*.*)|*.*" };
+        if (picker.ShowDialog(this) != DialogResult.OK) return;
+        var info = new FileInfo(picker.FileName);
+        if (info.Length > 2_000_000) throw new InvalidDataException("Choose a text list smaller than 2 MB.");
+        var parsed = PrivacyRules.ParseHostsText(File.ReadAllText(picker.FileName));
+        Config.Current.CustomBlockedDomains = PrivacyRules.NormalizeDomains(Config.Current.CustomBlockedDomains.Concat(parsed));
+        if (_blockedDomainsBox is not null)
+            _blockedDomainsBox.Text = string.Join(Environment.NewLine, Config.Current.CustomBlockedDomains);
+        MessageBox.Show(this, $"Imported {parsed.Count} unique domains. The saved list is capped at {PrivacyRules.CustomLimit}.", App.Name,
+            MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    void ChooseExtensionFolder()
+    {
+        if (_installExtension is null) return;
+        using var picker = new FolderBrowserDialog
+        {
+            Description = "Choose the unpacked browser extension folder containing manifest.json.",
+            UseDescriptionForTitle = true,
+            ShowNewFolderButton = false,
+        };
+        if (picker.ShowDialog(this) != DialogResult.OK) return;
+        _ = InstallExtensionAsync(picker.SelectedPath);
+    }
+
+    async Task InstallExtensionAsync(string folder)
+    {
+        try
+        {
+            var name = await _installExtension!(folder);
+            MessageBox.Show(this, $"{name} was installed for this browser profile.", App.Name,
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Could not install the extension.\n\n{ex.Message}", App.Name,
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    void ChooseCustomSurface()
+    {
+        using var picker = new ColorDialog
+        {
+            Color = ColorTranslator.FromHtml(Config.Current.CustomBackgroundColor),
+            FullOpen = true,
+        };
+        if (picker.ShowDialog(this) != DialogResult.OK) return;
+        Config.Current.CustomBackgroundColor = $"#{picker.Color.R:X2}{picker.Color.G:X2}{picker.Color.B:X2}";
+        Config.Current.ThemeMode = "Custom";
+    }
+
+    void ChooseBackground()
+    {
+        using var picker = new OpenFileDialog
+        {
+            Title = "Choose a new-tab background image or video",
+            Filter = "Images and video (*.png;*.jpg;*.jpeg;*.mp4;*.webm;*.m4v)|*.png;*.jpg;*.jpeg;*.mp4;*.webm;*.m4v|All files (*.*)|*.*",
+        };
+        if (picker.ShowDialog(this) != DialogResult.OK) return;
+        var ext = Path.GetExtension(picker.FileName).ToLowerInvariant();
+        if (ext is not (".png" or ".jpg" or ".jpeg" or ".mp4" or ".webm" or ".m4v"))
+            throw new InvalidDataException("Choose a PNG/JPEG image or MP4/WebM video.");
+        if (ext is ".png" or ".jpg" or ".jpeg")
+            using (var image = Image.FromFile(picker.FileName))
+                if (image.Width > 8192 || image.Height > 8192 || (long)image.Width * image.Height > 25_000_000)
+                    throw new InvalidDataException("Choose an image no larger than 8192 × 8192 pixels or 25 megapixels.");
+        var old = Config.Current.HomeBackgroundFile;
+        var name = "home-background" + ext;
+        ReplaceManagedFile(picker.FileName, Path.Combine(App.HomeBackgroundDirectory, name));
+        Config.Current.HomeBackgroundFile = name;
+        if (App.IsHomeBackgroundName(old) && old != name)
+            try { File.Delete(Path.Combine(App.HomeBackgroundDirectory, old)); } catch { }
+    }
+
+    void RemoveBackground()
+    {
+        var old = Config.Current.HomeBackgroundFile;
+        Config.Current.HomeBackgroundFile = "";
+        if (App.IsHomeBackgroundName(old))
+            try { File.Delete(Path.Combine(App.HomeBackgroundDirectory, old)); } catch { }
+    }
+
+    void ChooseCursor()
+    {
+        using var picker = new OpenFileDialog { Title = "Choose a Windows cursor", Filter = "Windows cursor (*.cur)|*.cur" };
+        if (picker.ShowDialog(this) != DialogResult.OK) return;
+        if (new FileInfo(picker.FileName).Length is 0 or > 65_536) throw new InvalidDataException("Choose a cursor file no larger than 64 KB.");
+        using (var validate = new Cursor(picker.FileName)) { }
+        ReplaceManagedFile(picker.FileName, App.Path_("custom-cursor.cur"));
+        Config.Current.CustomCursorEnabled = true;
+    }
+
+    void ResetCustomCursor()
+    {
+        Config.Current.CustomCursorEnabled = false;
+        try { File.Delete(App.Path_("custom-cursor.cur")); } catch { }
+    }
+
+    async Task ClearSiteDataAsync()
+    {
+        if (_clearSiteData is null) return;
+        if (MessageBox.Show(this,
+            "Clear cookies and site storage for every website in the regular profile? This may sign you out of sites.",
+            App.Name, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+        try
+        {
+            await _clearSiteData();
+            MessageBox.Show(this, "Website cookies and site data were cleared.", App.Name,
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Could not clear website data.\n\n{ex.Message}", App.Name,
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    async Task UpdateRecommendedListAsync()
+    {
+        if (_updateRecommendedList is null) return;
+        try
+        {
+            var count = await _updateRecommendedList();
+            MessageBox.Show(this, $"The recommended list is now active with {count:N0} domains.", App.Name,
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"The list could not be updated. Any previously downloaded list remains active.\n\n{ex.Message}",
+                App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    void RemoveRecommendedList()
+    {
+        if (PrivacyRules.DownloadedDomainCount == 0 || _removeRecommendedList is null)
+        {
+            MessageBox.Show(this, "There is no downloaded list to remove.", App.Name,
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        if (MessageBox.Show(this, "Remove the downloaded ad and tracker domains from this PC? Built-in and custom rules will remain active.",
+                App.Name, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+        _removeRecommendedList();
+        MessageBox.Show(this, "The downloaded list was removed.", App.Name,
+            MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    static void ReplaceManagedFile(string source, string destination)
+    {
+        if (Path.GetFullPath(source).Equals(Path.GetFullPath(destination), StringComparison.OrdinalIgnoreCase)) return;
+        Directory.CreateDirectory(App.DataDir);
+        var temp = destination + ".tmp";
+        File.Copy(source, temp, overwrite: true);
+        File.Move(temp, destination, overwrite: true);
     }
 
     void Toggle(string label, bool value, Action<bool> set)
@@ -314,6 +458,21 @@ sealed class SettingsForm : Form
         };
         check.CheckedChanged += (_, _) => set(check.Checked);
         Add(check, Theme.S(24));
+    }
+
+    void TextField(string label, string value, Action<string> set)
+    {
+        Add(new Label { Text = label, ForeColor = Theme.Text, AutoSize = false }, Theme.S(20), Theme.S(3));
+        var box = new TextBox
+        {
+            Text = value,
+            MaxLength = 512,
+            BorderStyle = BorderStyle.FixedSingle,
+            BackColor = Theme.Fill1,
+            ForeColor = Theme.Text,
+        };
+        box.TextChanged += (_, _) => set(box.Text);
+        Add(box, Theme.S(26));
     }
 
     void Spinner(string label, double value, Action<double> set)
@@ -367,85 +526,4 @@ sealed class SettingsForm : Form
     static Button Flat(string text) => Theme.Flat(text);
 
     // ---------- installing ----------
-
-    /// Store link or id -> unpacked folder on disk -> prompt -> handed to the engine.
-    async Task InstallStoreAsync(string input)
-    {
-        if (Extensions.StoreId(input) is null)
-        {
-            MessageBox.Show("Paste a Chrome Web Store link, or the 32-letter id out of one.", App.Name);
-            return;
-        }
-        Enabled = false;
-        var (key, error) = await Extensions.InstallStoreAsync(input);
-        Enabled = true;
-        if (key is null) { MessageBox.Show("Could not install it: " + error, App.Name); return; }
-        await ConfirmAndAddAsync(key, Extensions.DirFor(key), ours: true);
-    }
-
-    /// A folder of their own. Nothing to download, but the same V3 gate and the same prompt.
-    async Task InstallFolderAsync()
-    {
-        using var pick = new FolderBrowserDialog
-        {
-            Description = "Pick the folder that has manifest.json in it",
-            UseDescriptionForTitle = true,
-        };
-        if (pick.ShowDialog(this) != DialogResult.OK) return;
-
-        if (Extensions.ReadManifest(pick.SelectedPath) is not { } m)
-        {
-            MessageBox.Show("That folder has no readable manifest.json.", App.Name);
-            return;
-        }
-        if (m.Version < 3)
-        {
-            MessageBox.Show($"\"{m.Name}\" is a Manifest V2 extension. This engine only loads V3.", App.Name);
-            return;
-        }
-        // keyed by path, so re-adding the same folder updates the entry instead of doubling it
-        await ConfirmAndAddAsync("dir:" + pick.SelectedPath.ToLowerInvariant(), pick.SelectedPath, ours: false);
-    }
-
-    /// Says what the extension will be able to do before it gets to do any of it.
-    async Task ConfirmAndAddAsync(string key, string dir, bool ours)
-    {
-        var m = Extensions.ReadManifest(dir);
-        var perms = m?.Permissions is { Length: > 0 } p ? string.Join(", ", p) : "nothing in particular";
-        var proxy = Extensions.Proxies(m)
-            ? "\n\nHeads up: it wants the proxy API, which WebView2 does not have. It will install and " +
-              "enable, and then route nothing — not because of a setting, but because there is no proxy " +
-              "support in this engine to reach. A VPN app that routes at the network adapter works; an " +
-              "extension here cannot."
-            : "";
-        if (MessageBox.Show($"Install \"{m?.Name ?? "this extension"}\"?\n\nIt asks for: {perms}{proxy}",
-                App.Name, MessageBoxButtons.OKCancel) != DialogResult.OK)
-        {
-            if (ours) try { Directory.Delete(dir, true); } catch { }
-            return;
-        }
-        if (await _owner.AddExtensionAsync(key, dir, m?.Name ?? "Extension") is { } err)
-        {
-            MessageBox.Show("The engine refused it: " + err, App.Name);
-            if (ours) try { Directory.Delete(dir, true); } catch { }
-            return;
-        }
-        Reopen();
-    }
-
-    /// The rows are built in the constructor, so a list that changed means a fresh dialog.
-    void Reopen() => DialogResult = DialogResult.Retry;
-
-    async void UpdateExtensions()
-    {
-        Enabled = false;
-        var problems = new List<string>();
-        foreach (var src in Extensions.Bundled)
-            if (await Extensions.FetchAsync(src, staged: true) is { } err)
-                problems.Add($"{src.Display}: {err}");
-        Enabled = true;
-        MessageBox.Show(problems.Count == 0
-            ? $"Downloaded. Restart {App.Name} to load the new versions."
-            : "Some updates failed:\n\n" + string.Join('\n', problems), App.Name);
-    }
 }

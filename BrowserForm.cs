@@ -14,7 +14,7 @@ static class Url
     static readonly string[] PassThrough =
     [
         "http://", "https://", "mailto:", "tel:", "about:",
-        "file:", "chrome-extension://", "edge://", "chrome://", "view-source:",
+        "file:", "edge://", "chrome://", "view-source:",
     ];
 
     public static string From(string input, string searchTemplate)
@@ -25,9 +25,10 @@ static class Url
 
         var looksLikeHost = !s.Contains(' ') &&
             (s.Contains('.') || s.StartsWith("localhost", StringComparison.OrdinalIgnoreCase));
+        var search = Engines.IsValidTemplate(searchTemplate) ? searchTemplate : Engines.All[0].Url;
         return looksLikeHost && Uri.TryCreate("https://" + s, UriKind.Absolute, out _)
             ? "https://" + s
-            : searchTemplate.Replace("{q}", Uri.EscapeDataString(s));
+            : search.Replace("{q}", Uri.EscapeDataString(s), StringComparison.Ordinal);
     }
 }
 
@@ -35,42 +36,76 @@ sealed class Tab
 {
     public required WebView2 View;
     public required StripTab Strip;
+    public string DefaultUserAgent = "";
+    public bool ResourceFilterInstalled;
+    public bool IsHomePage;
+    public bool HasHomePage;
+    public bool IsLoading;
+    public string HomeNonce = "";
+    public string CursorScriptId = "";
+    public string CursorScriptKey = "";
     public DateTime LastActive = DateTime.UtcNow;
-    public bool Suspended;
+    public DateTime SuspendRetryAfterUtc;
+    public bool HomeAssetsMapped;
 }
 
 sealed class BrowserForm : Form
 {
     readonly Panel _content = new() { Dock = DockStyle.Fill, BackColor = Theme.Content };
-    readonly PillBar _marks = new() { Dock = DockStyle.Top, Visible = false };
+    readonly Panel _bookmarkPanel = new() { Dock = DockStyle.Left, BackColor = Theme.ChromeBg };
+    readonly PillBar _marks = new() { Dock = DockStyle.Fill };
+    readonly IconButton _marksToggle = new("‹", "Collapse bookmarks sidebar");
     readonly Panel _bar = new() { Dock = DockStyle.Top, Height = Theme.S(44), BackColor = Theme.ChromeBg };
-    readonly TabStrip _tabs = new() { Dock = DockStyle.Top };
+    readonly Panel _tabsPanel = new() { Dock = DockStyle.Left, BackColor = Theme.Strip };
+    readonly TabStrip _tabs = new() { Dock = DockStyle.Fill };
+    readonly IconButton _tabsToggle = new("‹", "Collapse tabs sidebar");
     readonly IconButton _back = new(Theme.Back, "Back  (Alt+Left)");
     readonly IconButton _fwd = new(Theme.Fwd, "Forward  (Alt+Right)");
     readonly IconButton _reload = new(Theme.Reload, "Reload  (F5)");
     readonly IconButton _star = new(Theme.Star, "Bookmark this page  (Ctrl+D)");
-    readonly IconButton _shield = new(Theme.Shield, "Blocking is on", 11f);
+    readonly IconButton _shield = new(Theme.Shield, "Built-in privacy settings", 11f);
+    readonly IconButton _viewMode = new(Theme.Fullscreen, "Display mode  (F11)");
     readonly IconButton _gear = new(Theme.Settings, "Settings  (Ctrl+,)");
+    readonly IconButton _privateButton = new(Theme.Private, "New private window  (Ctrl+Shift+N)");
+    readonly Label _privateBadge = new()
+    {
+        Text = "PRIVATE", AutoSize = false, TextAlign = ContentAlignment.MiddleCenter,
+        BackColor = Color.FromArgb(72, 35, 65), ForeColor = Color.FromArgb(255, 204, 235),
+        Font = Theme.UiBold, Visible = false,
+    };
     readonly OmniBox _omni = new();
-    /// One toolbar button per pinned extension, rebuilt whenever the pin set changes.
-    readonly List<IconButton> _pins = [];
     readonly List<Tab> _open = [];
     readonly System.Windows.Forms.Timer _idleTimer = new() { Interval = 30_000 };
+    readonly System.Windows.Forms.Timer _updateTimer = new() { Interval = 30_000 };
+    readonly System.Windows.Forms.Timer _dashboardSaveTimer = new() { Interval = 900 };
+    readonly ContextMenuStrip _displayMenu = new();
     readonly string[] _startUrls;
+    readonly bool _privateBrowsing;
+    readonly string? _privateProfilePath;
+    readonly List<DashboardTask> _dashboardTasks;
+    readonly Dictionary<Control, Cursor> _defaultCursors = [];
+    string _dashboardNotes;
+    Cursor? _customCursor;
+    bool _closing, _trueFullscreen, _suspensionSweep, _nativeCaptionLayout;
+    bool _extensionsAvailable;
+    Rectangle _savedBounds;
+    FormBorderStyle _savedBorderStyle;
+    FormWindowState _savedWindowState;
 
     CoreWebView2Environment? _env;
-    /// key -> why its install failed, surfaced in Settings instead of a startup popup.
-    public readonly Dictionary<string, string> ExtensionErrors = [];
-    /// The extension page Ctrl+T lands on, if one claimed the new tab. Kept so the address bar can
-    /// stay empty on it, the way it does on a built-in new tab page.
-    string? _newTab;
-
     Tab? Current => _tabs.SelectedIndex >= 0 && _tabs.SelectedIndex < _open.Count ? _open[_tabs.SelectedIndex] : null;
 
-    public BrowserForm(string[] startUrls)
+    public BrowserForm(string[] startUrls, bool privateBrowsing = false)
     {
         _startUrls = startUrls;
-        Text = App.Name;
+        _privateBrowsing = privateBrowsing;
+        _privateProfilePath = privateBrowsing
+            ? Path.Combine(Path.GetTempPath(), "baka-private-" + Guid.NewGuid().ToString("N")) : null;
+        if (_privateProfilePath is { } temporaryProfile)
+            AppDomain.CurrentDomain.ProcessExit += (_, _) => DeletePrivateProfileOnExit(temporaryProfile);
+        _dashboardNotes = privateBrowsing ? "" : Config.Current.DashboardNotes;
+        _dashboardTasks = privateBrowsing ? [] : [.. Config.Current.DashboardTasks];
+        Text = privateBrowsing ? $"Private — {App.Name}" : App.Name;
         BackColor = Theme.ChromeBg;
         ForeColor = Theme.Text;
         Font = Theme.Ui;
@@ -79,7 +114,10 @@ sealed class BrowserForm : Form
         ClientSize = new Size(Theme.S(1180), Theme.S(760));
         Icon = App.Icon;
 
-        _bar.Controls.AddRange([_back, _fwd, _reload, _omni, _star, _shield, _gear]);
+        _privateBadge.Visible = privateBrowsing;
+        _privateButton.Visible = !privateBrowsing;
+        _star.Enabled = !privateBrowsing;
+        _bar.Controls.AddRange([_back, _fwd, _reload, _omni, _star, _shield, _viewMode, _gear, _privateButton, _privateBadge]);
         _bar.Resize += (_, _) => LayoutBar();
         // hairline under the toolbar, Safari's one concession to a border
         _bar.Paint += (_, e) =>
@@ -92,17 +130,39 @@ sealed class BrowserForm : Form
         {
             if (i >= Bookmarks.All.Count) return;
             var mark = Bookmarks.All[i];
-            if (button == MouseButtons.Right) { Bookmarks.Remove(mark); RefreshBookmarks(); }
+            if (button == MouseButtons.Right)
+            {
+                if (!_privateBrowsing) { Bookmarks.Remove(mark); RefreshBookmarks(); }
+                return;
+            }
             else if (button == MouseButtons.Middle) OpenTab(mark.Url);
             else if (Current is { } t) Navigate(t, mark.Url);
         };
+        _marksToggle.Click += (_, _) =>
+        {
+            Config.Current.BookmarksCollapsed = !Config.Current.BookmarksCollapsed;
+            if (!_privateBrowsing) Config.Current.Save();
+            LayoutBookmarks();
+        };
+        _bookmarkPanel.Controls.Add(_marks);
+        _bookmarkPanel.Controls.Add(_marksToggle);
+        _tabsToggle.Click += (_, _) =>
+        {
+            Config.Current.TabsCollapsed = !Config.Current.TabsCollapsed;
+            if (!_privateBrowsing) Config.Current.Save();
+            LayoutTabs();
+        };
+        _tabsPanel.Controls.Add(_tabs);
+        _tabsPanel.Controls.Add(_tabsToggle);
 
-        // WinForms resolves docking last-child-first, so _tabs (added last) takes the top edge,
-        // then _bar, then the bookmarks bar, and _content gets the rest.
+        // Docking resolves last-child-first: tabs claim the left edge (or top row), then the toolbar,
+        // then bookmarks. The page gets the remaining area; both side rails can be independently collapsed.
         Controls.Add(_content);
-        Controls.Add(_marks);
+        Controls.Add(_bookmarkPanel);
         Controls.Add(_bar);
-        Controls.Add(_tabs);
+        Controls.Add(_tabsPanel);
+        LayoutTabs();
+        LayoutBookmarks();
 
         _back.Click += (_, _) => { if (Current?.View.CoreWebView2?.CanGoBack == true) Current.View.CoreWebView2.GoBack(); };
         _fwd.Click += (_, _) => { if (Current?.View.CoreWebView2?.CanGoForward == true) Current.View.CoreWebView2.GoForward(); };
@@ -114,6 +174,10 @@ sealed class BrowserForm : Form
         _gear.Click += (_, _) => OpenSettings();
         _shield.Click += (_, _) => OpenSettings();
         _star.Click += (_, _) => ToggleBookmark();
+        _privateButton.Click += (_, _) => OpenPrivateWindow();
+        _viewMode.Click += (_, _) => ShowDisplayMenu();
+        _displayMenu.Items.Add("True fullscreen (hide browser controls)", null, (_, _) => EnterTrueFullscreen());
+        _displayMenu.Items.Add("Keep tabs and toolbar visible (maximize)", null, (_, _) => KeepBrowserControlsVisible());
 
         _omni.Input.KeyDown += (_, e) =>
         {
@@ -127,22 +191,62 @@ sealed class BrowserForm : Form
         _tabs.CloseClicked += CloseTab;
 
         _idleTimer.Tick += async (_, _) => await SuspendIdleTabsAsync();
+        _dashboardSaveTimer.Tick += (_, _) =>
+        {
+            _dashboardSaveTimer.Stop();
+            SaveSession();
+            if (!_privateBrowsing) Config.Current.Save();
+        };
+        _updateTimer.Tick += async (_, _) =>
+        {
+            _updateTimer.Stop();
+            if (!_privateBrowsing && Config.Current.AutoUpdateEnabled)
+                await AutoUpdater.CheckAndDownloadAsync();
+            if (!_closing && !_privateBrowsing && Config.Current.AutoUpdateEnabled)
+            {
+                _updateTimer.Interval = 6 * 60 * 60 * 1000;
+                _updateTimer.Start();
+            }
+        };
         // titles that arrived after their visit was appended only reach history.jsonl here
-        FormClosing += (_, _) => History.Rewrite();
+        FormClosing += (_, _) =>
+        {
+            _closing = true;
+            _idleTimer.Stop();
+            _updateTimer.Stop();
+            _dashboardSaveTimer.Stop();
+            if (!_privateBrowsing)
+            {
+                SaveSession();
+                Config.Current.Save();
+            }
+            if (!_privateBrowsing) History.Rewrite();
+        };
     }
 
     protected override async void OnShown(EventArgs e)
     {
         base.OnShown(e);
-        Theme.Glass(this);
+        Theme.Glass(this, backdrop: Config.Current.LiquidGlassEnabled && !Theme.CustomMode, updateGlobalBackdrop: true);
         // the backdrop only shows where the chrome paints black, so the panels have to agree with it
         // (_tabs is deliberately absent: it paints itself opaque, over DWM's leftover caption strip).
         // It has to happen here, not in a field initialiser: Glass() above is what decides ChromeBg.
-        foreach (Control c in new Control[] { this, _bar, _marks, _omni, _omni.Input })
+        foreach (Control c in new Control[] { this, _bar, _bookmarkPanel, _marks, _tabsPanel, _tabsToggle, _omni, _omni.Input })
             c.BackColor = Theme.ChromeBg;
         Invalidate(true);
         LayoutBar();
-        await StartAsync();
+        LayoutTabs();
+        LayoutBookmarks();
+        try { await StartAsync(); }
+        catch (Exception ex)
+        {
+            if (!IsDisposed)
+            {
+                MessageBox.Show($"{App.Name} could not finish starting:\n\n{ex.Message}",
+                    App.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Close();
+            }
+        }
     }
 
     void LayoutBar()
@@ -153,11 +257,16 @@ sealed class BrowserForm : Form
         foreach (var b in new[] { _back, _fwd, _reload }) { b.SetBounds(x, y, btn, btn); x += btn + gap; }
 
         var right = _bar.Width - pad;
-        foreach (var b in new[] { _gear, _shield, _star }.Concat(_pins))
+        foreach (var b in new[] { _gear, _viewMode, _shield, _star, _privateButton }.Where(b => b.Visible))
         {
             right -= btn;
             b.SetBounds(right, y, btn, btn);
             right -= gap;
+        }
+        if (_privateBadge.Visible)
+        {
+            _privateBadge.SetBounds(x + Theme.S(4), y + Theme.S(3), Theme.S(58), btn - Theme.S(6));
+            x += Theme.S(68);
         }
         // Capped and centred in the space that is left, the way every desktop browser does it: stretched
         // edge to edge on a wide window the field reads as a horizon line, and a URL never needs 1100 px.
@@ -166,10 +275,58 @@ sealed class BrowserForm : Form
         _omni.SetBounds(x + Theme.S(6) + Math.Max(0, (span - w) / 2), y, w, btn);
     }
 
+    void LayoutBookmarks()
+    {
+        var top = Config.Current.BookmarksPosition == "Top";
+        var collapsed = !top && Config.Current.BookmarksCollapsed;
+        _bookmarkPanel.SuspendLayout();
+        _bookmarkPanel.Dock = top ? DockStyle.Top : DockStyle.Left;
+        _bookmarkPanel.Height = top ? Theme.S(36) : 0;
+        _bookmarkPanel.Width = top ? 0 : Theme.S(collapsed ? 44 : 224);
+        _bookmarkPanel.Visible = Config.Current.ShowBookmarksBar;
+        _bookmarkPanel.BackColor = Theme.ChromeBg;
+        _tabsPanel.BackColor = Theme.Strip;
+        _marks.BackColor = Theme.ChromeBg;
+        _marks.Dock = DockStyle.Fill;
+        _marksToggle.Dock = top ? DockStyle.Right : DockStyle.Top;
+        _marksToggle.Visible = !top;
+        _marksToggle.Glyph = collapsed ? "›" : "‹";
+        _marksToggle.AccessibleName = collapsed ? "Expand bookmarks sidebar" : "Collapse bookmarks sidebar";
+        _marks.Set(Bookmarks.All.Select(m => m.Title.Length > 26 ? m.Title[..25] + "…" : m.Title),
+            vertical: !top, compact: collapsed);
+        _bookmarkPanel.ResumeLayout(performLayout: true);
+    }
+
+    void LayoutTabs()
+    {
+        var left = Config.Current.TabsPosition == "Left";
+        var collapsed = left && Config.Current.TabsCollapsed;
+        var captionChanged = _nativeCaptionLayout != left;
+        _nativeCaptionLayout = left;
+        _tabsPanel.SuspendLayout();
+        _tabsPanel.Dock = left ? DockStyle.Left : DockStyle.Top;
+        _tabsPanel.Width = left ? Theme.S(collapsed ? 54 : 218) : 0;
+        _tabsPanel.Height = left ? 0 : Theme.S(42);
+        _tabsPanel.BackColor = Theme.Strip;
+        _tabs.Vertical = left;
+        _tabs.Compact = collapsed;
+        _tabsToggle.Visible = left;
+        _tabsToggle.Dock = DockStyle.Top;
+        _tabsToggle.Height = Theme.S(32);
+        _tabsToggle.Glyph = collapsed ? "›" : "‹";
+        _tabsToggle.AccessibleName = collapsed ? "Expand tabs sidebar" : "Collapse tabs sidebar";
+        _tabs.BackColor = Theme.Strip;
+        _tabsPanel.ResumeLayout(performLayout: true);
+        _tabs.RefreshLayout();
+        if (captionChanged && IsHandleCreated)
+            SetWindowPos(Handle, IntPtr.Zero, 0, 0, 0, 0, 0x0037); // frame changed, keep size and position
+    }
+
     // ---------- bookmarks ----------
 
     void ToggleBookmark()
     {
+        if (_privateBrowsing) return;
         if (Current?.View.CoreWebView2 is not { } core) return;
         if (core.Source is "about:blank" or "" or null) return;
         Bookmarks.Toggle(core.DocumentTitle, core.Source);
@@ -178,8 +335,7 @@ sealed class BrowserForm : Form
 
     void RefreshBookmarks()
     {
-        _marks.Set(Bookmarks.All.Select(m => m.Title.Length > 26 ? m.Title[..25] + "…" : m.Title));
-        _marks.Visible = Config.Current.ShowBookmarksBar && Bookmarks.All.Count > 0;
+        LayoutBookmarks();
         UpdateStar();
     }
 
@@ -194,26 +350,25 @@ sealed class BrowserForm : Form
 
     async Task StartAsync()
     {
-        Config.Load();
         Bookmarks.Load();
-        History.Load();
+        if (!_privateBrowsing) History.Load();
+        PrivacyRules.LoadDownloadedBlocklist();
+        RefreshPrivacyRuleCache();
         RefreshBookmarks();
-        Extensions.ApplyStagedUpdates();   // must precede env creation: a loaded folder can't be replaced
-
+        _extensionsAvailable = !_privateBrowsing && RuntimeSupportsExtensions();
         try
         {
-            _env = await CoreWebView2Environment.CreateAsync(null, App.Path_("profile"),
+            _env = await CoreWebView2Environment.CreateAsync(null, _privateProfilePath ?? App.Path_("profile"),
                 new CoreWebView2EnvironmentOptions(Flags.Load())
                 {
                     EnableTrackingPrevention = true,
-                    AreBrowserExtensionsEnabled = true,
+                    AreBrowserExtensionsEnabled = _extensionsAvailable,
                 });
         }
         catch (Exception ex)
         {
-            // The one prerequisite the app cannot install or work around. Windows 11 ships the runtime,
-            // Windows 10 does not always, so say where to get it rather than only that it is missing —
-            // the installer deliberately does not chain it, so this dialog is the whole safety net.
+            // The installer bootstraps the Evergreen runtime, but an offline machine or a managed
+            // Windows policy can still prevent setup. Offer Microsoft's official repair/download page.
             var go = MessageBox.Show(
                 $"The WebView2 runtime is missing or failed to start, and {App.Name} draws every page with it." +
                 $"\n\n{ex.Message}\n\nOpen Microsoft's download page for it?",
@@ -229,213 +384,300 @@ sealed class BrowserForm : Form
             return;
         }
 
-        var firstRun = Extensions.Bundled.Any(s => !Extensions.IsUnpacked(s.Key));
-        var first = await NewTabAsync(null, firstRun ? SetupPage : StartPage());
-        if (first is null) return;
-
-        await SetupExtensionsAsync(first.View.CoreWebView2!.Profile);
-        if (firstRun) first.View.CoreWebView2!.NavigateToString(StartPage());
-
-        foreach (var u in _startUrls) await NewTabAsync(Url.From(u, Config.Current.SearchUrl));
-        if (_startUrls.Length > 0) _tabs.Select(1);
+        if (_closing || IsDisposed) return;
+        ApplyNativeCursor();
+        if (!_privateBrowsing && _startUrls.Length == 0 && Config.Current.RestoreLastSession && Config.Current.LastSessionTabs.Count > 0)
+        {
+            var savedActiveIndex = Config.Current.LastActiveTabIndex;
+            Tab? savedActive = null;
+            for (var i = 0; i < Config.Current.LastSessionTabs.Count; i++)
+            {
+                var savedUrl = Config.Current.LastSessionTabs[i];
+                var tab = savedUrl.Length == 0
+                    ? await NewTabAsync(null, home: true)
+                    : await NewTabAsync(savedUrl);
+                if (tab is not null && i == savedActiveIndex) savedActive = tab;
+            }
+            if (_open.Count == 0) await NewTabAsync(null, home: true);
+            else if (savedActive is not null) _tabs.Select(_open.IndexOf(savedActive));
+            else _tabs.Select(0);
+        }
+        else
+        {
+            var first = await NewTabAsync(null, home: true);
+            if (first is null) return;
+            foreach (var u in _startUrls) await NewTabAsync(Url.From(u, Config.Current.SearchUrl));
+            if (_startUrls.Length > 0) _tabs.Select(1);
+        }
+        UpdateShield();
 
         _idleTimer.Start();
-    }
-
-    /// Downloads anything missing, registers each folder with the profile, and re-applies the
-    /// on/off state the user chose in Settings.
-    async Task SetupExtensionsAsync(CoreWebView2Profile profile)
-    {
-        IReadOnlyList<CoreWebView2BrowserExtension> installed;
-        try { installed = await profile.GetBrowserExtensionsAsync(); }
-        catch { installed = []; }
-
-        foreach (var ext in Extensions.All())
-        {
-            // retroactive: anything installed before the strip existed still has the store's update_url
-            if (ext.Dir.StartsWith(App.DataDir, StringComparison.OrdinalIgnoreCase))
-                Extensions.CutUpdateUrl(ext.Dir);
-
-            var wanted = Config.Current.ExtensionOn.GetValueOrDefault(ext.Key, true);
-            var known = Config.Current.ExtensionIds.GetValueOrDefault(ext.Key);
-            var live = installed.FirstOrDefault(x => x.Id == known);
-
-            if (live is null)
-            {
-                if (!File.Exists(Path.Combine(ext.Dir, "manifest.json")))
-                {
-                    // only the bundled two know how to fetch themselves; a user's folder that moved is gone
-                    if (!ext.Bundled) { ExtensionErrors[ext.Key] = "its folder is no longer there"; continue; }
-                    if (await Extensions.FetchAsync(Extensions.Bundled.First(b => b.Key == ext.Key), staged: false)
-                        is { } err)
-                    {
-                        ExtensionErrors[ext.Key] = err;
-                        continue;
-                    }
-                }
-                try { live = await profile.AddBrowserExtensionAsync(ext.Dir); }
-                catch (Exception ex) { ExtensionErrors[ext.Key] = ex.Message; continue; }
-                Config.Current.ExtensionIds[ext.Key] = live.Id;
-            }
-
-            try { if (live.IsEnabled != wanted) await live.EnableAsync(wanted); } catch { }
-            Config.Current.ExtensionOn[ext.Key] = wanted;
-        }
-        Config.Current.Save();
-        UpdateShield();
-        RefreshPins();
+        if (!_privateBrowsing && Config.Current.AutoUpdateEnabled) _updateTimer.Start();
     }
 
     void UpdateShield()
     {
-        var on = Extensions.Bundled.Count(s => Config.Current.ExtensionOn.GetValueOrDefault(s.Key, true)
-                                               && !ExtensionErrors.ContainsKey(s.Key));
-        _shield.Glyph = on > 0 ? Theme.Shield : Theme.NoShield;
+        var on = Config.Current.BuiltInBlockingEnabled;
+        _shield.Glyph = on ? Theme.Shield : Theme.NoShield;
+        _shield.AccessibleName = on ? "Built-in ad and tracker blocking is on" : "Built-in ad and tracker blocking is off";
         _shield.Invalidate();
     }
 
-    /// Called by Settings so the toggle takes effect without a restart.
-    public async Task SetExtensionEnabledAsync(string key, bool on)
+    void ApplyNativeCursor()
     {
-        Config.Current.ExtensionOn[key] = on;
-        Config.Current.Save();
-        UpdateShield();
-        RefreshPins();
-        var id = Config.Current.ExtensionIds.GetValueOrDefault(key);
-        if (id is null || Current?.View.CoreWebView2 is not { } core) return;
+        _customCursor?.Dispose();
+        _customCursor = null;
         try
         {
-            if ((await core.Profile.GetBrowserExtensionsAsync()).FirstOrDefault(x => x.Id == id) is { } ext)
-                await ext.EnableAsync(on);
+            if (Config.Current.CustomCursorEnabled && File.Exists(App.Path_("custom-cursor.cur")))
+                _customCursor = new Cursor(App.Path_("custom-cursor.cur"));
+        }
+        catch { _customCursor = null; }
+        Cursor = _customCursor ?? Cursors.Default;
+        ApplyCursorTree(this);
+    }
+
+    void ApplyCursorTree(Control parent)
+    {
+        if (!_defaultCursors.ContainsKey(parent)) _defaultCursors[parent] = parent.Cursor;
+        parent.Cursor = _customCursor ?? _defaultCursors[parent];
+        foreach (Control child in parent.Controls)
+        {
+            ApplyCursorTree(child);
+        }
+    }
+
+    void ForgetCursorTree(Control parent)
+    {
+        foreach (Control child in parent.Controls)
+        {
+            ForgetCursorTree(child);
+        }
+        _defaultCursors.Remove(parent);
+    }
+
+    async void OpenSettings()
+    {
+        using var dlg = new SettingsForm(_privateBrowsing, ClearSiteDataAsync,
+            _extensionsAvailable ? InstallExtensionAsync : null, _extensionsAvailable,
+            UpdateRecommendedBlocklistAsync, RemoveRecommendedBlocklist);
+        dlg.ShowDialog(this);
+        try { await ApplySettingsAsync(); }
+        catch (Exception ex) { if (!_closing && !IsDisposed) MessageBox.Show(ex.Message, App.Name); }
+    }
+
+    async Task<int> UpdateRecommendedBlocklistAsync()
+    {
+        var count = await PrivacyRules.UpdateRecommendedBlocklistAsync();
+        RefreshPrivacyRuleCache();
+        return count;
+    }
+
+    void RemoveRecommendedBlocklist()
+    {
+        PrivacyRules.ClearDownloadedBlocklist();
+        RefreshPrivacyRuleCache();
+    }
+
+    static bool RuntimeSupportsExtensions()
+    {
+        // WebView2 browser extensions became available in the stable runtime at 120.0.2210.55.
+        // Older installed runtimes keep extension support off rather than failing browser startup.
+        try
+        {
+            var versionText = CoreWebView2Environment.GetAvailableBrowserVersionString();
+            var versionToken = versionText.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+            return Version.TryParse(versionToken, out var version) && version >= new Version(120, 0, 2210, 55);
+        }
+        catch { return false; }
+    }
+
+    async Task<string> InstallExtensionAsync(string extensionFolder)
+    {
+        if (_privateBrowsing) throw new InvalidOperationException("Extensions are not installed from private windows.");
+        if (Current?.View.CoreWebView2 is not { } core)
+            throw new InvalidOperationException("Open a browser tab before installing an extension.");
+        var fullPath = Path.GetFullPath(extensionFolder);
+        if (!File.Exists(Path.Combine(fullPath, "manifest.json")))
+            throw new InvalidDataException("Select the folder containing the extension's manifest.json file. Web Store pages and .crx files are not supported here.");
+        var extension = await core.Profile.AddBrowserExtensionAsync(fullPath);
+        return extension.Name;
+    }
+
+    void SaveSession()
+    {
+        if (_privateBrowsing) return;
+        if (!Config.Current.RestoreLastSession)
+        {
+            Config.Current.LastSessionTabs = [];
+            Config.Current.LastActiveTabIndex = 0;
+            return;
+        }
+
+        var tabs = new List<string>();
+        foreach (var tab in _open)
+        {
+            var source = tab.View.CoreWebView2?.Source ?? "";
+            if (tab.IsHomePage || source.Equals("about:blank", StringComparison.OrdinalIgnoreCase))
+            {
+                tabs.Add("");
+                continue;
+            }
+            if (Uri.TryCreate(source, UriKind.Absolute, out var uri) &&
+                (uri.Scheme is "http" or "https" or "file") && source.Length <= 4096)
+                tabs.Add(source);
+            else
+                tabs.Add("");
+        }
+
+        const int maxSessionTabs = 50;
+        var firstSaved = Math.Max(0, tabs.Count - maxSessionTabs);
+        Config.Current.LastSessionTabs = tabs.Skip(firstSaved).ToList();
+        Config.Current.LastActiveTabIndex = Math.Clamp(_tabs.SelectedIndex - firstSaved, 0,
+            Math.Max(0, Config.Current.LastSessionTabs.Count - 1));
+    }
+
+    Task ClearSiteDataAsync() => Current?.View.CoreWebView2 is { } core
+        ? core.Profile.ClearBrowsingDataAsync(CoreWebView2BrowsingDataKinds.AllSite)
+        : Task.CompletedTask;
+
+    async Task ApplySettingsAsync()
+    {
+        ApplyTheme();
+        ApplyNativeCursor();
+        RefreshPrivacyRuleCache();
+        LayoutTabs();
+        foreach (var t in _open)
+            if (t.View.CoreWebView2 is { } core)
+            {
+                core.Profile.PreferredTrackingPreventionLevel = TrackingLevel();
+                ApplyPagePreferences(core, t.DefaultUserAgent);
+                if (t.IsHomePage) core.Settings.IsScriptEnabled = true;
+                ConfigureResourceFiltering(t);
+                _ = ApplyPrivacyHeadersAsync(core);
+                await ApplyCustomCursorAsync(t);
+                if (t.IsHomePage)
+                {
+                    MapHomeAssets(t);
+                    core.NavigateToString(StartPage(t.HomeNonce));
+                }
+            }
+        UpdateShield();
+        _idleTimer.Enabled = Config.Current.IdleMinutes > 0;
+        if (_privateBrowsing || !Config.Current.AutoUpdateEnabled)
+            _updateTimer.Stop();
+        else if (!_updateTimer.Enabled)
+        {
+            _updateTimer.Interval = 30_000;
+            _updateTimer.Start();
+        }
+        RefreshBookmarks();
+    }
+
+    void ApplyTheme()
+    {
+        Theme.Glass(this, backdrop: Config.Current.LiquidGlassEnabled && !Theme.CustomMode, updateGlobalBackdrop: true);
+        BackColor = Theme.ChromeBg;
+        ForeColor = Theme.Text;
+        _content.BackColor = Theme.Content;
+        _bar.BackColor = Theme.ChromeBg;
+        _bookmarkPanel.BackColor = Theme.ChromeBg;
+        _tabsPanel.BackColor = Theme.Strip;
+        _marks.BackColor = Theme.ChromeBg;
+        _omni.BackColor = Theme.ChromeBg;
+        _omni.Input.BackColor = Theme.ChromeBg;
+        Application.SetColorMode(Theme.DarkMode ? SystemColorMode.Dark : SystemColorMode.System);
+        LayoutBookmarks();
+        Invalidate(true);
+        _tabs.Invalidate();
+    }
+
+    public static void ApplyPagePreferences(CoreWebView2 core, string defaultUserAgent)
+    {
+        core.Settings.IsScriptEnabled = Config.Current.JavaScriptEnabled;
+        var userAgent = Config.Current.UserAgent.Trim();
+        try { core.Settings.UserAgent = userAgent.Length == 0 ? defaultUserAgent : userAgent; }
+        catch { try { core.Settings.UserAgent = defaultUserAgent; } catch { } }
+    }
+
+    static void ConfigureResourceFiltering(Tab tab)
+    {
+        if (tab.View.CoreWebView2 is not { } core) return;
+        var shouldFilter = !Config.Current.ImagesEnabled || Config.Current.BuiltInBlockingEnabled;
+        if (tab.ResourceFilterInstalled == shouldFilter) return;
+        const string allHttp = "*://*/*";
+        if (shouldFilter)
+            core.AddWebResourceRequestedFilter(allHttp, CoreWebView2WebResourceContext.All,
+                CoreWebView2WebResourceRequestSourceKinds.All);
+        else
+            core.RemoveWebResourceRequestedFilter(allHttp, CoreWebView2WebResourceContext.All,
+                CoreWebView2WebResourceRequestSourceKinds.All);
+        tab.ResourceFilterInstalled = shouldFilter;
+    }
+
+    static readonly string[] BuiltInTrackerDomains =
+    [
+        "doubleclick.net", "googlesyndication.com", "googleadservices.com", "google-analytics.com",
+        "analytics.google.com", "googletagmanager.com", "adservice.google.com", "facebook.net",
+        "analytics.tiktok.com", "hotjar.com", "clarity.ms", "segment.io", "segment.com",
+        "fullstory.com", "mixpanel.com", "amplitude.com", "inspectlet.com", "mouseflow.com",
+        "logrocket.io", "newrelic.com", "nr-data.net", "quantserve.com", "scorecardresearch.com",
+        "outbrain.com", "taboola.com", "adnxs.com", "criteo.com", "criteo.net", "pubmatic.com",
+        "openx.net", "rubiconproject.com", "indexexchange.com", "advertising.com", "media.net",
+        "adform.net", "smartadserver.com", "lijit.com", "bidswitch.net", "casalemedia.com",
+        "serving-sys.com", "sharethrough.com", "triplelift.com", "yieldmo.com", "tapad.com",
+        "bluekai.com", "demdex.net", "everesttech.net", "omtrdc.net", "2o7.net", "mookie1.com",
+        "agkn.com", "adjust.com", "appsflyer.com", "appsflyer.tk", "adroll.com",
+        "adzerk.net", "adsrvr.org", "adsymptotic.com", "bounceexchange.com",
+        "chartbeat.com", "evergage.com", "extole.com", "flashtalking.com", "heap.io", "heap.com",
+        "krxd.net", "lotame.com", "marketo.net", "microsoftadvertising.com", "moatads.com", "optimove.net",
+        "pardot.com", "parsely.com", "permutive.com", "quantummetric.com",
+        "rfihub.com", "rlcdn.com", "siftscience.com", "siteimproveanalytics.io", "tealiumiq.com",
+        "userzoom.com", "veinteractive.com", "webengage.com", "zemanta.com",
+    ];
+
+    static HashSet<string> _requestBlockDomains = new(BuiltInTrackerDomains, StringComparer.OrdinalIgnoreCase);
+    static HashSet<string> _allowedDomainSet = new(StringComparer.OrdinalIgnoreCase);
+
+    static void RefreshPrivacyRuleCache()
+    {
+        _requestBlockDomains = [.. BuiltInTrackerDomains.Concat(PrivacyRules.DownloadedDomains)
+            .Concat(Config.Current.CustomBlockedDomains).Distinct(StringComparer.OrdinalIgnoreCase)];
+        _allowedDomainSet = new HashSet<string>(Config.Current.AllowedDomains, StringComparer.OrdinalIgnoreCase);
+    }
+
+    static bool DomainMatches(string host, HashSet<string> domains)
+    {
+        if (domains.Contains(host)) return true;
+        for (var dot = host.IndexOf('.'); dot >= 0; dot = host.IndexOf('.', dot + 1))
+            if (domains.Contains(host[(dot + 1)..])) return true;
+        return false;
+    }
+
+    static void HandleWebResourceRequest(CoreWebView2 core, CoreWebView2WebResourceRequestedEventArgs e)
+    {
+        var blockedImage = e.ResourceContext == CoreWebView2WebResourceContext.Image && !Config.Current.ImagesEnabled;
+        var blockedTracker = false;
+        if (Config.Current.BuiltInBlockingEnabled && TryGetHttpHost(e.Request.Uri, out var host))
+            blockedTracker = !DomainMatches(host, _allowedDomainSet) && DomainMatches(host, _requestBlockDomains);
+        if (!blockedImage && !blockedTracker) return;
+        try
+        {
+            e.Response = core.Environment.CreateWebResourceResponse(
+                null, 204, blockedImage ? "Images disabled by browser settings" : "Blocked by browser privacy settings",
+                "Content-Length: 0");
         }
         catch { }
     }
 
-    public string? ExtensionId(string key) => Config.Current.ExtensionIds.GetValueOrDefault(key);
-
-    public void SetExtensionPinned(string key, bool pinned)
+    static bool TryGetHttpHost(string url, out string host)
     {
-        Config.Current.ExtensionPinned[key] = pinned;
-        Config.Current.Save();
-        RefreshPins();
-    }
-
-    /// Hands an already-unpacked folder to the profile and remembers it. Returns an error, or null.
-    public async Task<string?> AddExtensionAsync(string key, string dir, string name)
-    {
-        if (Current?.View.CoreWebView2 is not { } core) return "no window is ready yet";
-        CoreWebView2BrowserExtension live;
-        try { live = await core.Profile.AddBrowserExtensionAsync(dir); }
-        catch (Exception ex) { return ex.Message; }
-
-        Config.Current.Extra.RemoveAll(e => e.Key == key);
-        Config.Current.Extra.Add(new ExtraExtension(key, name, dir));
-        Config.Current.ExtensionIds[key] = live.Id;
-        Config.Current.ExtensionOn[key] = true;
-        ExtensionErrors.Remove(key);
-        Config.Current.Save();
-        RefreshPins();
-        return null;
-    }
-
-    /// Unregisters a user-added extension and deletes its folder if we were the ones who downloaded it.
-    public async Task RemoveExtensionAsync(string key)
-    {
-        var id = Config.Current.ExtensionIds.GetValueOrDefault(key);
-        if (id is not null && Current?.View.CoreWebView2 is { } core)
-            try
-            {
-                if ((await core.Profile.GetBrowserExtensionsAsync()).FirstOrDefault(x => x.Id == id) is { } ext)
-                    await ext.RemoveAsync();
-            }
-            catch { }
-
-        var extra = Config.Current.Extra.FirstOrDefault(e => e.Key == key);
-        Config.Current.Extra.RemoveAll(e => e.Key == key);
-        Config.Current.ExtensionIds.Remove(key);
-        Config.Current.ExtensionOn.Remove(key);
-        Config.Current.ExtensionPinned.Remove(key);
-        ExtensionErrors.Remove(key);
-        Config.Current.Save();
-        // a folder of the user's own is theirs; only our own download gets deleted
-        if (extra is not null && extra.Dir.StartsWith(App.DataDir, StringComparison.OrdinalIgnoreCase))
-            try { Directory.Delete(extra.Dir, true); } catch { }
-        RefreshPins();
-    }
-
-    // ---------- pinned extensions ----------
-
-    void RefreshPins()
-    {
-        foreach (var p in _pins) { _bar.Controls.Remove(p); p.Dispose(); }
-        _pins.Clear();
-
-        foreach (var ext in Extensions.All().Reverse())
-        {
-            if (!Config.Current.ExtensionPinned.GetValueOrDefault(ext.Key)) continue;
-            if (!Config.Current.ExtensionOn.GetValueOrDefault(ext.Key, true)) continue;
-            if (ExtensionErrors.ContainsKey(ext.Key)) continue;
-
-            var info = Extensions.ReadManifest(ext.Dir);
-            var b = new IconButton(ext.Display[..1].ToUpperInvariant(), ext.Display, 9f)
-            {
-                Picture = info?.Icon is { } rel ? LoadIcon(Path.Combine(ext.Dir, rel.Replace('/', '\\'))) : null,
-            };
-            b.Click += (_, _) => OpenExtensionUi(ext, b);
-            _pins.Add(b);
-            _bar.Controls.Add(b);
-        }
-        LayoutBar();
-    }
-
-    /// Copied off the stream so GDI+ does not keep the icon file locked for the life of the button.
-    static Image? LoadIcon(string path)
-    {
-        try
-        {
-            using var fs = File.OpenRead(path);
-            using var src = Image.FromStream(fs);
-            return new Bitmap(src);
-        }
-        catch { return null; }
-    }
-
-    /// A pinned button opens the extension's own popup in a floating panel, falling back to its options
-    /// page in a tab when it has no popup.
-    /// ponytail: WebView2 exposes no browser-action host, so the popup is just its HTML in a WebView.
-    /// Per-site controls inside it may not see the page you are looking at. Upgrade path: none until
-    /// WebView2 ships an extension-action API.
-    void OpenExtensionUi(Installed ext, Control anchor)
-    {
-        if (Config.Current.ExtensionIds.GetValueOrDefault(ext.Key) is not { } id || _env is null) return;
-        var info = Extensions.ReadManifest(ext.Dir);
-        if (info?.Popup is { } popup)
-        {
-            var at = anchor.PointToScreen(new Point(anchor.Width, anchor.Height + 6));
-            new ExtensionPopup(_env, $"chrome-extension://{id}/{popup}", at).Show(this);
-        }
-        else if (info?.Options is { } options) OpenTab($"chrome-extension://{id}/{options}");
-    }
-
-    void OpenSettings()
-    {
-        // the extension rows are built in the dialog's ctor, so adding or removing one asks for a reopen
-        while (true)
-        {
-            using var dlg = new SettingsForm(this);
-            var again = dlg.ShowDialog(this) == DialogResult.Retry;
-            ApplySettings();
-            if (!again) return;
-        }
-    }
-
-    void ApplySettings()
-    {
-        foreach (var t in _open)
-            if (t.View.CoreWebView2 is { } core)
-                core.Profile.PreferredTrackingPreventionLevel = TrackingLevel();
-        _idleTimer.Enabled = Config.Current.IdleMinutes > 0;
-        RefreshBookmarks();
+        host = "";
+        if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+            !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) return false;
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https")) return false;
+        host = uri.IdnHost;
+        return true;
     }
 
     static CoreWebView2TrackingPreventionLevel TrackingLevel() => Config.Current.TrackingPrevention switch
@@ -450,65 +692,104 @@ sealed class BrowserForm : Form
 
     public void OpenTab(string url) => _ = NewTabAsync(url);
 
-    async Task<Tab?> NewTabAsync(string? url, string? html = null)
+    async Task<Tab?> NewTabAsync(string? url, string? html = null, bool home = false)
     {
-        if (_env is null) return null;
+        if (_closing || IsDisposed || _env is null) return null;
 
         var view = new WebView2 { Dock = DockStyle.Fill, DefaultBackgroundColor = Theme.Content, Visible = false };
-        var tab = new Tab { View = view, Strip = new StripTab() };
+        var tab = new Tab
+        {
+            View = view, Strip = new StripTab(), IsHomePage = home || (url is null && html is null),
+            HasHomePage = home || (url is null && html is null),
+            HomeNonce = Guid.NewGuid().ToString("N"),
+        };
         tab.Strip.Tag = tab;
         _content.Controls.Add(view);
+        if (_customCursor is not null) ApplyCursorTree(view);
         _open.Add(tab);
         _tabs.Tabs.Add(tab.Strip);
+        _tabs.RefreshLayout();
 
         try { await view.EnsureCoreWebView2Async(_env); }
         catch (Exception ex)
         {
-            _open.Remove(tab);
-            _tabs.Tabs.Remove(tab.Strip);
-            view.Dispose();
-            MessageBox.Show(ex.Message, App.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            if (_open.Remove(tab) && !IsDisposed) _tabs.Tabs.Remove(tab.Strip);
+            ForgetCursorTree(view);
+            if (!view.IsDisposed) view.Dispose();
+            if (!_closing && !IsDisposed)
+                MessageBox.Show(ex.Message, App.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
             return null;
         }
 
-        Wire(tab);
-        _tabs.Select(_open.Count - 1);
+        if (_closing || IsDisposed || view.IsDisposed || !_open.Contains(tab))
+        {
+            if (!view.IsDisposed) ForgetCursorTree(view);
+            if (!view.IsDisposed) view.Dispose();
+            if (_open.Remove(tab) && !IsDisposed) _tabs.Tabs.Remove(tab.Strip);
+            return null;
+        }
+
+        try { await WireAsync(tab); }
+        catch (Exception ex)
+        {
+            if (_open.Remove(tab) && !IsDisposed) _tabs.Tabs.Remove(tab.Strip);
+            ForgetCursorTree(view);
+            if (!view.IsDisposed) view.Dispose();
+            if (!_closing && !IsDisposed)
+                MessageBox.Show($"Could not initialize a tab.\n\n{ex.Message}", App.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return null;
+        }
+        if (_closing || IsDisposed || view.IsDisposed || !_open.Contains(tab))
+        {
+            if (!view.IsDisposed) view.Dispose();
+            return null;
+        }
+        _tabs.Select(_open.IndexOf(tab));
         ShowActiveTab();
 
         // html == "" means "leave it alone": NewWindowRequested navigates the view itself.
+        if (tab.IsHomePage)
+        {
+            view.CoreWebView2!.Settings.IsScriptEnabled = true;
+            MapHomeAssets(tab);
+        }
         if (html is { Length: > 0 }) view.CoreWebView2!.NavigateToString(html);
         else if (url is not null) Navigate(tab, url);
-        else if (html is null)
-        {
-            if (NewTabOverride() is { } page) Navigate(tab, page);
-            else view.CoreWebView2!.NavigateToString(StartPage());
-        }
+        else if (html is null) view.CoreWebView2!.NavigateToString(StartPage(tab.HomeNonce));
         return tab;
-    }
-
-    /// An extension that declares chrome_url_overrides.newtab expects to *be* the new tab page.
-    /// WebView2 has no new-tab concept, so it ignores the override outright — this is the substitution
-    /// it would otherwise do. First enabled one wins, like Chrome.
-    string? NewTabOverride()
-    {
-        foreach (var ext in Extensions.All())
-        {
-            if (!Config.Current.ExtensionOn.GetValueOrDefault(ext.Key, true)) continue;
-            if (ExtensionErrors.ContainsKey(ext.Key)) continue;
-            if (Config.Current.ExtensionIds.GetValueOrDefault(ext.Key) is not { } id) continue;
-            if (Extensions.ReadManifest(ext.Dir)?.NewTab is { } page)
-                return _newTab = $"chrome-extension://{id}/{page}";
-        }
-        return null;
     }
 
     static void Navigate(Tab tab, string url)
     {
         try { tab.View.CoreWebView2!.Navigate(url); }
-        catch { tab.View.CoreWebView2!.Navigate("about:blank"); }
+        catch { try { tab.View.CoreWebView2?.Navigate("about:blank"); } catch { } }
     }
 
-    void Wire(Tab tab)
+    static void MapHomeAssets(Tab tab)
+    {
+        if (tab.View.CoreWebView2 is not { } core) return;
+        if (App.HomeBackgroundUrl.Length == 0)
+        {
+            if (tab.HomeAssetsMapped)
+            {
+                try { core.ClearVirtualHostNameToFolderMapping(App.HomeBackgroundHost); } catch { }
+                tab.HomeAssetsMapped = false;
+            }
+            return;
+        }
+        try
+        {
+            Directory.CreateDirectory(App.HomeBackgroundDirectory);
+            if (tab.HomeAssetsMapped)
+                core.ClearVirtualHostNameToFolderMapping(App.HomeBackgroundHost);
+            core.SetVirtualHostNameToFolderMapping(App.HomeBackgroundHost, App.HomeBackgroundDirectory,
+                CoreWebView2HostResourceAccessKind.Allow);
+            tab.HomeAssetsMapped = true;
+        }
+        catch { tab.HomeAssetsMapped = false; }
+    }
+
+    async Task WireAsync(Tab tab)
     {
         var core = tab.View.CoreWebView2!;
 
@@ -522,29 +803,58 @@ sealed class BrowserForm : Form
         core.Settings.IsPasswordAutosaveEnabled = false;
         core.Settings.IsStatusBarEnabled = false;
         core.Settings.AreDefaultContextMenusEnabled = true;
+        tab.DefaultUserAgent = core.Settings.UserAgent;
+        ApplyPagePreferences(core, tab.DefaultUserAgent);
+        core.WebResourceRequested += (_, e) => HandleWebResourceRequest(core, e);
+        ConfigureResourceFiltering(tab);
+        core.WebMessageReceived += (_, e) => SaveDashboardMessage(tab, e);
+
+        await ApplyPrivacyHeadersAsync(core);
+        await ApplyCustomCursorAsync(tab);
 
         core.DocumentTitleChanged += (_, _) =>
         {
             tab.Strip.Title = core.DocumentTitle.Length > 0 ? core.DocumentTitle : "New tab";
             _tabs.Invalidate();
-            History.Touch(core.Source, tab.Strip.Title);
-            if (tab == Current) Text = $"{tab.Strip.Title} — {App.Name}";
+            if (!_privateBrowsing) History.Touch(core.Source, tab.Strip.Title);
+            if (tab == Current) SetWindowTitle(tab.Strip.Title);
         };
 
         core.SourceChanged += (_, _) => { if (tab == Current) { ShowUrl(core.Source); UpdateStar(); } };
         core.HistoryChanged += (_, _) => { if (tab == Current) SyncNavButtons(core); };
         core.FaviconChanged += async (_, _) => await LoadFaviconAsync(tab);
 
-        core.NavigationStarting += (_, _) =>
+        core.NavigationStarting += (_, e) =>
         {
+            tab.IsLoading = true;
+            if (!e.Uri.Equals("about:blank", StringComparison.OrdinalIgnoreCase))
+            {
+                if (tab.HomeAssetsMapped)
+                {
+                    try { core.ClearVirtualHostNameToFolderMapping(App.HomeBackgroundHost); } catch { }
+                    tab.HomeAssetsMapped = false;
+                }
+                core.Settings.IsScriptEnabled = Config.Current.JavaScriptEnabled;
+            }
+            else if (tab.HasHomePage)
+            {
+                tab.IsHomePage = true;
+                core.Settings.IsScriptEnabled = true;
+                MapHomeAssets(tab);
+            }
             tab.LastActive = DateTime.UtcNow;
-            tab.Suspended = false;
+            tab.SuspendRetryAfterUtc = DateTime.MinValue;
+            if (core.IsSuspended)
+                try { core.Resume(); } catch { }
             if (tab == Current) _reload.Glyph = Theme.Stop;
         };
         core.NavigationCompleted += (_, e) =>
         {
+            tab.IsLoading = false;
+            tab.IsHomePage = tab.HasHomePage && core.Source.Equals("about:blank", StringComparison.OrdinalIgnoreCase);
+            tab.LastActive = DateTime.UtcNow;
             if (tab == Current) _reload.Glyph = Theme.Reload;
-            if (e.IsSuccess) History.Add(core.Source, core.DocumentTitle);
+            if (e.IsSuccess && !_privateBrowsing) History.Add(core.Source, core.DocumentTitle);
         };
 
         // keep window.opener intact instead of dropping target=_blank links on the floor
@@ -559,6 +869,105 @@ sealed class BrowserForm : Form
             finally { deferral.Complete(); }
         };
     }
+
+    static async Task ApplyPrivacyHeadersAsync(CoreWebView2 core)
+    {
+        try
+        {
+            await core.CallDevToolsProtocolMethodAsync("Network.enable", "{}");
+            var headers = Config.Current.SendPrivacySignals
+                ? new Dictionary<string, string> { ["DNT"] = "1", ["Sec-GPC"] = "1" }
+                : new Dictionary<string, string>();
+            await core.CallDevToolsProtocolMethodAsync("Network.setExtraHTTPHeaders",
+                JsonSerializer.Serialize(new { headers }));
+        }
+        catch { /* some runtime versions restrict privacy headers; blocking remains independent */ }
+    }
+
+    void SaveDashboardMessage(Tab tab, CoreWebView2WebMessageReceivedEventArgs e)
+    {
+        if (!tab.IsHomePage || e.Source is not ("about:blank" or "about:srcdoc")) return;
+        try
+        {
+            using var message = JsonDocument.Parse(e.WebMessageAsJson);
+            var root = message.RootElement;
+            if (!root.TryGetProperty("kind", out var kind) || kind.GetString() != "dashboard" ||
+                !root.TryGetProperty("nonce", out var nonce) || nonce.GetString() != tab.HomeNonce ||
+                !root.TryGetProperty("notes", out var notes) || notes.ValueKind != JsonValueKind.String ||
+                !root.TryGetProperty("tasks", out var tasks) || tasks.ValueKind != JsonValueKind.Array) return;
+
+            var before = JsonSerializer.Serialize(new { _dashboardNotes, _dashboardTasks, Config.Current.DashboardWidgets });
+            _dashboardNotes = notes.GetString() is { Length: <= 4000 } note ? note : "";
+            _dashboardTasks.Clear();
+            foreach (var item in tasks.EnumerateArray().Take(40))
+            {
+                if (!item.TryGetProperty("text", out var text) || text.ValueKind != JsonValueKind.String) continue;
+                var value = text.GetString()?.Trim();
+                if (string.IsNullOrEmpty(value)) continue;
+                var done = item.TryGetProperty("done", out var completed) && completed.ValueKind == JsonValueKind.True;
+                _dashboardTasks.Add(new DashboardTask(value.Length > 140 ? value[..140] : value, done));
+            }
+            if (root.TryGetProperty("widgets", out var widgets) && widgets.ValueKind == JsonValueKind.Array)
+            {
+                var allowed = new HashSet<string>(["clock", "quicklinks", "notes", "tasks", "privacy"], StringComparer.Ordinal);
+                Config.Current.DashboardWidgets = widgets.EnumerateArray()
+                    .Where(w => w.ValueKind == JsonValueKind.String)
+                    .Select(w => w.GetString()!)
+                    .Where(allowed.Contains).Distinct(StringComparer.Ordinal).ToList();
+            }
+            if (!_privateBrowsing)
+            {
+                Config.Current.DashboardNotes = _dashboardNotes;
+                Config.Current.DashboardTasks = [.. _dashboardTasks];
+                if (before != JsonSerializer.Serialize(new { _dashboardNotes, _dashboardTasks, Config.Current.DashboardWidgets }))
+                {
+                    _dashboardSaveTimer.Stop();
+                    _dashboardSaveTimer.Start();
+                    BroadcastDashboardState(tab);
+                }
+            }
+        }
+        catch { /* malformed page messages cannot interrupt navigation */ }
+    }
+
+    void BroadcastDashboardState(Tab source)
+    {
+        var json = JsonSerializer.Serialize(new
+        {
+            kind = "dashboard-state", notes = _dashboardNotes, tasks = _dashboardTasks,
+            widgets = Config.Current.DashboardWidgets,
+        });
+        foreach (var tab in _open)
+        {
+            if (tab == source || !tab.IsHomePage || tab.View.CoreWebView2 is not { } core) continue;
+            try { core.PostWebMessageAsJson(json); } catch { }
+        }
+    }
+
+    async Task ApplyCustomCursorAsync(Tab tab)
+    {
+        if (tab.View.CoreWebView2 is not { } core) return;
+        var dataUri = App.CustomCursorDataUri;
+        var shouldRun = Config.Current.JavaScriptEnabled || tab.IsHomePage;
+        var key = dataUri + (shouldRun ? "|script" : "|off");
+        var css = dataUri.Length == 0 ? "" : $"*,*:before,*:after{{cursor:url('{dataUri}') 0 0,auto!important}}";
+        var script = "(()=>{const apply=()=>{if(!document.documentElement)return false;let s=document.getElementById('baka-custom-cursor');if(!s){s=document.createElement('style');s.id='baka-custom-cursor';document.documentElement.appendChild(s)}s.textContent=" +
+            JsonSerializer.Serialize(css) + ";return true};if(!apply()){const o=new MutationObserver(()=>{if(apply())o.disconnect()});o.observe(document,{childList:true,subtree:true})}})();";
+        try
+        {
+            if (tab.CursorScriptKey != key)
+            {
+                if (tab.CursorScriptId.Length > 0) core.RemoveScriptToExecuteOnDocumentCreated(tab.CursorScriptId);
+                tab.CursorScriptId = shouldRun ? await core.AddScriptToExecuteOnDocumentCreatedAsync(script) : "";
+                tab.CursorScriptKey = key;
+            }
+            if (shouldRun) await core.ExecuteScriptAsync(script);
+        }
+        catch { }
+    }
+
+    void SetWindowTitle(string title) => Text = _privateBrowsing
+        ? $"{title} — Private — {App.Name}" : $"{title} — {App.Name}";
 
     /// The tab's own favicon, taken from the engine's cache rather than fetched again, scaled once to
     /// the box the strip draws (16 px at 100%, more on a scaled display) and cached on the tab. Failures
@@ -588,6 +997,7 @@ sealed class BrowserForm : Form
             }
         }
         catch { }
+        if (_closing || IsDisposed || !_open.Contains(tab)) { next?.Dispose(); return; }
         if (tab.Strip.Icon == next) return;
         tab.Strip.Icon?.Dispose();
         tab.Strip.Icon = next;
@@ -598,7 +1008,7 @@ sealed class BrowserForm : Form
     {
         if (_omni.Input.Focused) return;                                   // don't fight the user's typing
         // a new tab page is a new tab page, whoever renders it: no plumbing URL in the address bar
-        var blank = url is "about:blank" or "" || url == _newTab;
+        var blank = url is "about:blank" or "";
         _omni.Input.Text = blank ? "" : url;
         // The glyph is the whole security indicator: plain http gets the warning mark, in red, because a
         // browser that ships with tracking protection on shouldn't be quiet about an unencrypted page.
@@ -626,12 +1036,11 @@ sealed class BrowserForm : Form
         {
             var t = _open[i];
             var active = i == _tabs.SelectedIndex;
-            if (active && t.Suspended)
-            {
-                try { t.View.CoreWebView2?.Resume(); t.Suspended = false; } catch { }
-            }
             t.View.Visible = active;
             if (!active) continue;
+            t.SuspendRetryAfterUtc = DateTime.MinValue;
+            if (t.View.CoreWebView2 is { } activeCore && activeCore.IsSuspended)
+                try { activeCore.Resume(); } catch { }
             t.View.BringToFront();
             t.LastActive = DateTime.UtcNow;
             if (t.View.CoreWebView2 is { } core)
@@ -639,7 +1048,7 @@ sealed class BrowserForm : Form
                 ShowUrl(core.Source);
                 SyncNavButtons(core);
                 UpdateStar();
-                Text = $"{t.Strip.Title} — {App.Name}";
+        SetWindowTitle(t.Strip.Title);
             }
         }
     }
@@ -650,7 +1059,9 @@ sealed class BrowserForm : Form
         var tab = _open[index];
         _open.RemoveAt(index);
         _tabs.Tabs.RemoveAt(index);
+        _tabs.RefreshLayout();
         tab.Strip.Icon?.Dispose();
+        ForgetCursorTree(tab.View);
         tab.View.Dispose();
         if (_open.Count == 0) { Close(); return; }
         _tabs.Removed(index);
@@ -659,14 +1070,46 @@ sealed class BrowserForm : Form
 
     async Task SuspendIdleTabsAsync()
     {
-        var minutes = Config.Current.IdleMinutes;
-        if (minutes <= 0) return;
-        foreach (var t in _open.ToArray())
+        if (_closing || IsDisposed || _suspensionSweep) return;
+        _suspensionSweep = true;
+        try
         {
-            if (t == Current || t.Suspended || t.View.IsDisposed) continue;
-            if ((DateTime.UtcNow - t.LastActive).TotalMinutes < minutes) continue;
-            try { t.Suspended = await t.View.CoreWebView2!.TrySuspendAsync(); } catch { }
+            var minutes = Config.Current.IdleMinutes;
+            if (minutes <= 0) return;
+            foreach (var t in _open.ToArray())
+            {
+                if (_closing || IsDisposed) return;
+                if (t == Current || t.View.IsDisposed || t.View.Visible) continue;
+                if ((DateTime.UtcNow - t.LastActive).TotalMinutes < minutes) continue;
+                if (t.SuspendRetryAfterUtc > DateTime.UtcNow) continue;
+                try
+                {
+                    var core = t.View.CoreWebView2;
+                    if (core is null) continue;
+                    if (t.IsLoading || core.IsSuspended || core.IsDocumentPlayingAudio) continue;
+                    var suspended = await core.TrySuspendAsync();
+                    if (_closing || IsDisposed || t.View.IsDisposed || !_open.Contains(t)) continue;
+                    // A user can select the tab while the suspend request is in flight. Visibility is
+                    // authoritative here: WebView2 resumes automatically when shown, and an explicit
+                    // Resume handles the short race where suspension completed just after selection.
+                    if (t == Current || t.View.Visible)
+                    {
+                        if (core.IsSuspended) try { core.Resume(); } catch { }
+                        t.SuspendRetryAfterUtc = DateTime.MinValue;
+                    }
+                    else if (!suspended || !core.IsSuspended)
+                        t.SuspendRetryAfterUtc = DateTime.UtcNow.AddMinutes(5);
+                    else
+                        t.SuspendRetryAfterUtc = DateTime.MinValue;
+                }
+                catch
+                {
+                    if (!t.View.IsDisposed && _open.Contains(t))
+                        t.SuspendRetryAfterUtc = DateTime.UtcNow.AddMinutes(5);
+                }
+            }
         }
+        finally { _suspensionSweep = false; }
     }
 
     // ---------- keyboard ----------
@@ -678,6 +1121,8 @@ sealed class BrowserForm : Form
     struct Rect { public int Left, Top, Right, Bottom; }
 
     [DllImport("user32.dll")] static extern bool IsZoomed(IntPtr h);
+    [DllImport("user32.dll", SetLastError = true)]
+    static extern bool SetWindowPos(IntPtr hWnd, IntPtr insertAfter, int x, int y, int cx, int cy, uint flags);
 
     const int WmNcCalcSize = 0x83, WmNcHitTest = 0x84, WmNcMouseMove = 0xA0, WmNcLButtonDown = 0xA1,
               WmNcLButtonUp = 0xA2, WmNcMouseLeave = 0x02A2, HtClient = 1, HtCaption = 2, HtMaxButton = 9;
@@ -693,6 +1138,20 @@ sealed class BrowserForm : Form
     /// four WM_NC* cases below feed its hover and its click back in by hand.
     protected override void WndProc(ref Message m)
     {
+        if (_trueFullscreen)
+        {
+            base.WndProc(ref m);
+            return;
+        }
+
+        // With tabs on the left, use the normal Windows caption. The compact top-tab mode retains the
+        // custom caption controls and snap-layout hit testing below.
+        if (_tabs.Vertical)
+        {
+            base.WndProc(ref m);
+            return;
+        }
+
         if (m.Msg == WmNcCalcSize && m.WParam != IntPtr.Zero)
         {
             var win = Marshal.PtrToStructure<Rect>(m.LParam);        // window rect, before Windows insets it
@@ -743,7 +1202,14 @@ sealed class BrowserForm : Form
     {
         switch (keyData)
         {
+            case Keys.F11:
+                if (_trueFullscreen) ExitTrueFullscreen(); else ShowDisplayMenu();
+                return true;
+            case Keys.Escape when _trueFullscreen:
+                ExitTrueFullscreen();
+                return true;
             case Keys.Control | Keys.T: _ = NewTabAsync(null); return true;
+            case Keys.Control | Keys.Shift | Keys.N: OpenPrivateWindow(); return true;
             case Keys.Control | Keys.W: CloseTab(_tabs.SelectedIndex); return true;
             case Keys.Control | Keys.L:
             case Keys.Alt | Keys.D:
@@ -756,10 +1222,12 @@ sealed class BrowserForm : Form
             case Keys.Control | Keys.J:
                 try { Current?.View.CoreWebView2?.OpenDefaultDownloadDialog(); } catch { }
                 return true;
-            case Keys.Control | Keys.H: _ = NewTabAsync(null, HistoryPage()); return true;
+            case Keys.Control | Keys.H:
+                _ = NewTabAsync(null, _privateBrowsing ? PrivateHistoryPage() : HistoryPage());
+                return true;
             case Keys.Control | Keys.Shift | Keys.B:
                 Config.Current.ShowBookmarksBar = !Config.Current.ShowBookmarksBar;
-                Config.Current.Save();
+                if (!_privateBrowsing) Config.Current.Save();
                 RefreshBookmarks();
                 return true;
             case Keys.Alt | Keys.Left: _back.PerformClick(); return true;
@@ -774,45 +1242,250 @@ sealed class BrowserForm : Form
         return false;
     }
 
+    void ShowDisplayMenu()
+    {
+        if (_closing || _viewMode.IsDisposed) return;
+        _displayMenu.Show(_viewMode, new Point(0, _viewMode.Height));
+    }
+
+    void EnterTrueFullscreen()
+    {
+        if (_trueFullscreen || _closing) return;
+        _savedBounds = Bounds;
+        _savedWindowState = WindowState;
+        _savedBorderStyle = FormBorderStyle;
+        var monitor = Screen.FromControl(this).Bounds;
+
+        _trueFullscreen = true;
+        WindowState = FormWindowState.Normal;
+        FormBorderStyle = FormBorderStyle.None;
+        _tabsPanel.Visible = _bar.Visible = _bookmarkPanel.Visible = false;
+        Bounds = monitor; // Includes the taskbar area; the borderless window covers the monitor.
+        _content.BackColor = Theme.Content;
+    }
+
+    void KeepBrowserControlsVisible()
+    {
+        ExitTrueFullscreen();
+        _tabsPanel.Visible = _bar.Visible = true;
+        LayoutTabs();
+        LayoutBookmarks();
+        WindowState = FormWindowState.Maximized;
+        _content.BackColor = Theme.Content; // Dock.Fill gives the active tab the remaining client area.
+    }
+
+    void ExitTrueFullscreen()
+    {
+        if (!_trueFullscreen) return;
+        _trueFullscreen = false;
+        WindowState = FormWindowState.Normal;
+        FormBorderStyle = _savedBorderStyle;
+        var restoreBounds = _savedBounds;
+        if (!Screen.AllScreens.Any(s => s.Bounds.IntersectsWith(restoreBounds)))
+            restoreBounds = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(100, 100, Theme.S(1180), Theme.S(760));
+        Bounds = restoreBounds;
+        WindowState = _savedWindowState;
+        _tabsPanel.Visible = _bar.Visible = true;
+        LayoutTabs();
+        LayoutBookmarks();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _idleTimer.Dispose();
+            _updateTimer.Dispose();
+            _dashboardSaveTimer.Dispose();
+            _displayMenu.Dispose();
+        }
+        base.Dispose(disposing);
+        if (disposing)
+        {
+            _customCursor?.Dispose();
+            if (_privateProfilePath is { } privatePath) _ = DeletePrivateProfileAsync(privatePath);
+        }
+    }
+
+    void OpenPrivateWindow()
+    {
+        try
+        {
+            var exe = Environment.ProcessPath;
+            if (string.IsNullOrWhiteSpace(exe)) return;
+            Process.Start(new ProcessStartInfo(exe, "--private") { UseShellExecute = true });
+        }
+        catch (Exception ex) { MessageBox.Show($"Could not open a private window.\n\n{ex.Message}", App.Name); }
+    }
+
+    static async Task DeletePrivateProfileAsync(string path)
+    {
+        if (!IsPrivateProfilePath(path)) return;
+        var fullPath = Path.GetFullPath(path);
+        for (var attempt = 0; attempt < 30; attempt++)
+        {
+            try { if (Directory.Exists(fullPath)) Directory.Delete(fullPath, recursive: true); return; }
+            catch (IOException) { await Task.Delay(400); }
+            catch (UnauthorizedAccessException) { await Task.Delay(400); }
+        }
+    }
+
+    static void DeletePrivateProfileOnExit(string path)
+    {
+        if (!IsPrivateProfilePath(path)) return;
+        var fullPath = Path.GetFullPath(path);
+        for (var attempt = 0; attempt < 24; attempt++)
+        {
+            try { if (Directory.Exists(fullPath)) Directory.Delete(fullPath, recursive: true); return; }
+            catch (IOException) { Thread.Sleep(250); }
+            catch (UnauthorizedAccessException) { Thread.Sleep(250); }
+        }
+    }
+
+    static bool IsPrivateProfilePath(string path)
+    {
+        // Only delete a GUID-named directory made directly under the OS temp folder by this feature.
+        var tempRoot = Path.GetFullPath(Path.GetTempPath()).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var fullPath = Path.GetFullPath(path);
+        var name = Path.GetFileName(fullPath);
+        return fullPath.StartsWith(tempRoot, StringComparison.OrdinalIgnoreCase) &&
+            name.StartsWith("baka-private-", StringComparison.Ordinal) &&
+            Guid.TryParseExact(name["baka-private-".Length..], "N", out _);
+    }
+
     // ---------- pages ----------
 
-    const string SetupPage = $$"""
-        <!doctype html><meta charset=utf-8><title>Setting up</title>
-        <style>html{color-scheme:dark}body{margin:0;height:100vh;display:grid;place-items:center;
-        background:#1c1c1e;color:#f2f2f7;font:15px 'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif}
-        h1{font-size:46px;margin:0 0 10px;letter-spacing:-1.5px;font-weight:600}p{color:#9e9ea3}</style>
-        <div style="text-align:center">
-        <h1>{{App.Name}}</h1>
-        <p>Installing uBlock Origin Lite and Privacy Badger…</p></div>
-        """;
-
-    static string StartPage() => $$"""
-        <!doctype html><meta charset=utf-8><title>New tab</title>
+    string StartPage(string nonce)
+    {
+        static string Css(Color color) => $"#{color.R:X2}{color.G:X2}{color.B:X2}";
+        var mode = Theme.DarkMode ? "dark" : "light";
+        var logo = App.Logo;
+        var background = App.HomeBackgroundUrl;
+        var video = background.Length > 0 && App.HomeBackgroundIsVideo;
+        var liquidGlass = Config.Current.LiquidGlassEnabled;
+        var backdrop = background.Length == 0 || video
+            ? $"background:radial-gradient(ellipse at 50% 10%,{Css(Theme.Fill2)},{Css(Theme.Content)} 68%);"
+            : $"background-image:linear-gradient(#0003,#0005),url('{background}');background-size:cover;background-position:center;";
+        var videoLayer = video
+            ? $"<div class=wallpaper aria-hidden=true><video src=\"{Esc(background)}\" autoplay muted loop playsinline preload=none></video></div>"
+            : "";
+        var cardSurface = video || !liquidGlass ? Css(Theme.Fill1) : $"{Css(Theme.Fill1)}c8";
+        var cardFilter = video || !liquidGlass ? "" : "backdrop-filter:blur(18px) saturate(145%);";
+        var cardGlass = liquidGlass
+            ? "background-image:linear-gradient(145deg,#ffffff12,transparent 58%);box-shadow:0 18px 48px #0003,inset 0 1px 0 #ffffff24;"
+            : "box-shadow:0 8px 22px #0002;";
+        var searchGlass = liquidGlass && !video ? "backdrop-filter:blur(14px) saturate(135%);" : "";
+        var menuSurface = video || !liquidGlass ? Css(Theme.Content) : $"{Css(Theme.Fill1)}f2";
+        var menuGlass = liquidGlass && !video ? "backdrop-filter:blur(16px) saturate(140%);" : "";
+        var cursor = App.CustomCursorDataUri;
+        var cursorCss = cursor.Length == 0 ? "" : $"*,*:before,*:after{{cursor:url('{cursor}') 0 0,auto!important}}";
+        var privateBadge = _privateBrowsing ? "<span class=private>PRIVATE</span>" : "";
+        var links = new System.Text.StringBuilder();
+        foreach (var mark in Bookmarks.All.Take(20))
+            if (Uri.TryCreate(mark.Url, UriKind.Absolute, out var u) && u.Scheme is "http" or "https")
+                links.Append($"<a class=link href=\"{Esc(mark.Url)}\" title=\"{Esc(mark.Title)}\">{Esc(mark.Title.Length > 22 ? mark.Title[..21] + "…" : mark.Title)}</a>");
+        if (links.Length == 0) links.Append("<span class=empty>Bookmark a page to add a quick link.</span>");
+        var enabledWidgets = Config.Current.DashboardWidgets;
+        string WidgetVisibility(string id) => enabledWidgets.Contains(id, StringComparer.Ordinal) ? "" : "hidden";
+        var widgetOptions = string.Join("", new[]
+        {
+            ("clock", "Clock and date"), ("quicklinks", "Bookmark shortcuts"), ("notes", "Notes"),
+            ("tasks", "Task list"), ("privacy", "Privacy status"),
+        }.Select(w => $"<label><input type=checkbox data-widget=\"{w.Item1}\" {(enabledWidgets.Contains(w.Item1, StringComparer.Ordinal) ? "checked" : "")}>{w.Item2}</label>"));
+        var state = JsonSerializer.Serialize(new { notes = _dashboardNotes, tasks = _dashboardTasks, widgets = enabledWidgets });
+        var signals = Config.Current.SendPrivacySignals ? "privacy signals enabled when supported" : "privacy signals off";
+        var privateText = _privateBrowsing ? "Private window · this session is not added to history" :
+            $"Host blocking {(Config.Current.BuiltInBlockingEnabled ? "on" : "off")} · {signals}";
+        var script = """
+            <script>
+            const T=__SEARCH__,nonce=__NONCE__,state=__STATE__;
+            const noteBox=document.getElementById('notes'),list=document.getElementById('tasks'),taskInput=document.getElementById('newtask');
+            noteBox.value=state.notes||'';
+            function snapshotTasks(){return Array.from(list.children).map(row=>({text:row.querySelector('span').textContent,done:row.querySelector('input').checked}))}
+            function save(){try{chrome.webview.postMessage({kind:'dashboard',nonce,notes:noteBox.value,tasks:snapshotTasks(),widgets:state.widgets||[]})}catch{}}
+            function applyWidgets(){for(const id of ['clock','quicklinks','notes','tasks','privacy']){const card=document.getElementById('widget-'+id);if(card)card.hidden=!(state.widgets||[]).includes(id);const clock=document.getElementById('widget-clock');if(clock)clock.hidden=!(state.widgets||[]).includes('clock');const box=document.querySelector('[data-widget="'+id+'"]');if(box)box.checked=(state.widgets||[]).includes(id)}}
+            function setWidget(id,on){state.widgets=state.widgets||[];state.widgets=on?[...new Set([...state.widgets,id])]:state.widgets.filter(x=>x!==id);applyWidgets();save()}
+            function drawTasks(){list.replaceChildren();for(const item of (state.tasks||[])){const text=item.text??item.Text,done=item.done??item.Done;const row=document.createElement('li');row.className='task'+(done?' done':'');
+              const check=document.createElement('input');check.type='checkbox';check.checked=!!done;const label=document.createElement('span');label.textContent=text;
+              const remove=document.createElement('button');remove.type='button';remove.className='remove';remove.textContent='×';check.onchange=()=>{state.tasks=Array.from(list.children).map(r=>({text:r.querySelector('span').textContent,done:r.querySelector('input').checked}));drawTasks();save()};
+              remove.onclick=()=>{row.remove();state.tasks=Array.from(list.children).map(r=>({text:r.querySelector('span').textContent,done:r.querySelector('input').checked}));save()};row.append(check,label,remove);list.append(row)}}
+            function tick(){const d=new Date();document.getElementById('time').textContent=d.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});document.getElementById('date').textContent=d.toLocaleDateString([], {weekday:'long',month:'long',day:'numeric'})}
+            chrome.webview.addEventListener('message',e=>{const m=e.data;if(m?.kind!=='dashboard-state')return;state.notes=m.notes||'';state.tasks=m.tasks||[];state.widgets=m.widgets||state.widgets;noteBox.value=state.notes;drawTasks();applyWidgets()});
+            document.querySelectorAll('[data-widget]').forEach(box=>box.onchange=()=>setWidget(box.dataset.widget,box.checked));
+            drawTasks();applyWidgets();tick();setInterval(()=>{if(!document.hidden&&!document.getElementById('widget-clock').hidden)tick()},30000);noteBox.oninput=()=>{clearTimeout(window.noteTimer);window.noteTimer=setTimeout(save,750)};noteBox.onchange=save;
+            function addTask(){const text=taskInput.value.trim();if(!text||list.children.length>=40)return;state.tasks=[...Array.from(list.children).map(r=>({text:r.querySelector('span').textContent,done:r.querySelector('input').checked})),{text,done:false}];taskInput.value='';drawTasks();save()}
+            document.getElementById('addtask').onclick=addTask;taskInput.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();addTask()}};
+            document.getElementById('search').onsubmit=e=>{e.preventDefault();location=T.replace('{q}',encodeURIComponent(document.getElementById('q').value))};
+            document.head.append(Object.assign(document.createElement('link'),{rel:'icon',href:document.getElementById('mark').src}));
+            const bgVideo=document.querySelector('.wallpaper video');
+            document.addEventListener('visibilitychange',()=>{if(!bgVideo)return;if(document.hidden)bgVideo.pause();else bgVideo.play().catch(()=>{})});
+            window.addEventListener('pagehide',save);
+            </script>
+            """;
+        script = script.Replace("__SEARCH__", Json(Config.Current.SearchUrl), StringComparison.Ordinal)
+            .Replace("__NONCE__", Json(nonce), StringComparison.Ordinal).Replace("__STATE__", state, StringComparison.Ordinal);
+        return $$"""
+        <!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>New tab</title>
         <style>
-        html{color-scheme:dark}
-        body{margin:0;height:100vh;display:grid;place-items:center;background:#1c1c1e;color:#f2f2f7;
-             font:15px 'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif}
-        img{width:104px;height:104px;margin-bottom:26px;border-radius:23px}
-        input{width:min(72vw,540px);padding:13px 20px;border-radius:12px;border:1px solid #38383a;
-              background:#2c2c2e;color:#f2f2f7;font-size:15px;font-family:inherit;outline:none;
-              transition:border-color .15s}
-        input:focus{border-color:#0a84ff}
-        p{margin-top:24px;color:#9e9ea3;font-size:13px}
+        html{color-scheme:{{mode}}}*{box-sizing:border-box}
+        body{position:relative;isolation:isolate;margin:0;min-height:100vh;{{backdrop}}background-color:{{Css(Theme.Content)}};color:{{Css(Theme.Text)}};
+             font:14px 'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;background-attachment:fixed}
+        .wallpaper{position:fixed;inset:0;z-index:0;overflow:hidden;pointer-events:none}.wallpaper:after{content:"";position:absolute;inset:0;background:linear-gradient(#0005,#0008)}
+        .wallpaper video{width:100%;height:100%;object-fit:cover}
+        .wrap{position:relative;z-index:1;width:min(1080px,94vw);margin:0 auto;padding:5vh 0 8vh}
+        header{display:flex;align-items:center;justify-content:space-between;margin-bottom:26px;color:{{Css(Theme.Muted)}}}
+        .brand{display:flex;align-items:center;gap:12px}.brand img{width:38px;height:38px;border-radius:11px}
+        .clock{text-align:right;font-size:14px;font-variant-numeric:tabular-nums}.clock b{display:block;font-size:24px;color:{{Css(Theme.Text)}};font-weight:600}
+        .private{color:#ffc9e8;border:1px solid #a44787;border-radius:99px;padding:5px 10px;font-size:11px;letter-spacing:.08em}
+        .search{margin:0 auto 24px;max-width:700px}.search input{width:100%;padding:16px 20px;border-radius:18px;
+        border:1px solid {{Css(Theme.Line)}};background:linear-gradient(145deg,{{Css(Theme.Fill1)}}e8,{{Css(Theme.Fill1)}}d0);color:{{Css(Theme.Text)}};font-size:16px;font-family:inherit;outline:none;
+        box-shadow:0 12px 34px #0002,inset 0 1px 0 #ffffff20;{{searchGlass}}transition:border-color .16s ease,box-shadow .16s ease,transform .16s ease}
+        .search input:focus{border-color:{{Css(Theme.Accent)}};box-shadow:0 0 0 3px {{Css(Theme.Accent)}}28,0 16px 38px #0003;transform:translateY(-1px)}
+        input:focus,textarea:focus{border-color:{{Css(Theme.Accent)}}!important;box-shadow:0 0 0 3px {{Css(Theme.Accent)}}22}
+        .grid{display:grid;grid-template-columns:1.2fr 1fr;gap:14px}.card[hidden]{display:none}.card{background:{{cardSurface}};border:1px solid {{Css(Theme.Line)}};
+        border-radius:18px;padding:18px;{{cardFilter}}{{cardGlass}}min-height:170px;transition:transform .16s ease,border-color .16s ease,box-shadow .16s ease}.card:hover{transform:translateY(-2px);border-color:{{Css(Theme.Accent)}}66}.card h2{font-size:12px;text-transform:uppercase;letter-spacing:.1em;color:{{Css(Theme.Muted)}};margin:0 0 14px}
+        .links{display:flex;flex-wrap:wrap;gap:9px}.link{color:{{Css(Theme.Text)}};background:{{Css(Theme.Fill2)}};border-radius:10px;padding:10px 12px;text-decoration:none;max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .link:hover{color:{{Css(Theme.Accent)}}}.empty{color:{{Css(Theme.Muted)}}}.notes{width:100%;height:116px;resize:vertical;border:1px solid {{Css(Theme.Line)}};border-radius:10px;
+        padding:10px;background:{{Css(Theme.Content)}};color:{{Css(Theme.Text)}};font:inherit;outline:none}.taskrow{display:flex;gap:8px;margin-top:10px}
+        button{border:1px solid {{Css(Theme.Line)}};background:{{Css(Theme.Fill2)}};color:{{Css(Theme.Text)}};border-radius:9px;padding:8px 12px;font:inherit;cursor:pointer}
+        .widget-menu{position:relative}.widget-menu summary{list-style:none;cursor:pointer;border:1px solid {{Css(Theme.Line)}};background:{{Css(Theme.Fill2)}};border-radius:9px;padding:8px 12px;color:{{Css(Theme.Text)}}}.widget-menu summary::-webkit-details-marker{display:none}
+        .widget-options{position:absolute;right:0;top:42px;z-index:5;min-width:210px;padding:10px;background:{{menuSurface}};{{menuGlass}}border:1px solid {{Css(Theme.Line)}};border-radius:14px;box-shadow:0 12px 34px #0005;display:grid;gap:8px}.widget-options label{display:flex;align-items:center;gap:8px;white-space:nowrap;color:{{Css(Theme.Text)}}}
+        .taskrow input{flex:1;min-width:0;border:1px solid {{Css(Theme.Line)}};border-radius:9px;padding:8px 10px;background:{{Css(Theme.Content)}};color:{{Css(Theme.Text)}};font:inherit;outline:none}
+        ul{list-style:none;padding:0;margin:0;display:grid;gap:8px}.task{display:flex;align-items:center;gap:9px}.task input{accent-color:{{Css(Theme.Accent)}}}
+        .task span{flex:1;overflow-wrap:anywhere}.task.done span{text-decoration:line-through;color:{{Css(Theme.Muted)}}}.remove{border:0;background:none;color:{{Css(Theme.Muted)}};padding:2px 6px}
+        footer{text-align:center;color:{{Css(Theme.Muted)}};font-size:12px;margin-top:18px}
+        {{cursorCss}}
+        @media(max-width:700px){.grid{grid-template-columns:1fr}
+        .wrap{padding-top:3vh}.card{min-height:unset}
+        }
+        @media(prefers-reduced-motion:reduce){*,*:before,*:after{transition:none!important;scroll-behavior:auto!important;transform:none!important} }
         </style>
-        <div style="text-align:center">
-          <img id=mark src="{{App.Logo}}" alt="{{App.Name}}">
-          <form onsubmit="location=T.replace('{q}',encodeURIComponent(q.value));return false">
-            <input id=q name=q autofocus autocomplete=off placeholder="Search or enter address"
-                   aria-label="Search or enter address">
-          </form>
-          <p>Ads and trackers blocked · no telemetry · idle tabs suspended</p>
-        </div>
-        <script>const T={{Json(Config.Current.SearchUrl)}};
-        // reuse the one copy of the mark as this page's favicon, so the tab strip shows it too
-        document.head.append(Object.assign(document.createElement('link'),{rel:'icon',href:mark.src}))</script>
+        {{videoLayer}}
+        <main class=wrap>
+          <header><div class=brand><img id=mark src="{{logo}}" alt="{{App.Name}}"><span>{{App.Name}}</span></div>
+            <div style="display:flex;align-items:center;gap:10px">{{privateBadge}}<details class=widget-menu><summary>Widgets</summary><div class=widget-options>{{widgetOptions}}</div></details><div id=widget-clock class=clock {{WidgetVisibility("clock")}}><b id=time></b><span id=date></span></div></div>
+          </header>
+          <form class=search id=search><input id=q autofocus autocomplete=off placeholder="Search or enter address" aria-label="Search or enter address"></form>
+          <section class=grid>
+            <article id=widget-quicklinks class=card {{WidgetVisibility("quicklinks")}}><h2>Quick links</h2><div class=links>{{links}}</div></article>
+            <article id=widget-notes class=card {{WidgetVisibility("notes")}}><h2>Notes</h2><textarea class=notes id=notes maxlength=4000 placeholder="A private scratchpad saved on this device"></textarea></article>
+            <article id=widget-tasks class=card {{WidgetVisibility("tasks")}}><h2>Tasks</h2><ul id=tasks></ul><div class=taskrow><input id=newtask maxlength=140 placeholder="Add a task"><button id=addtask type=button>Add</button></div></article>
+            <article id=widget-privacy class=card {{WidgetVisibility("privacy")}}><h2>Privacy</h2><p>{{privateText}}</p><p style="color:{{Css(Theme.Muted)}}">No weather calls or dashboard data are sent to a service.</p></article>
+          </section>
+          <footer>Dashboard data stays in this browser profile. Private windows keep it only for this session.</footer>
+        </main>
+        {{script}}
         """;
+    }
 
     static string Json(string s) => JsonSerializer.Serialize(s);
+
+    static string PrivateHistoryPage() => """
+        <!doctype html><meta charset=utf-8><title>Private browsing</title>
+        <style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#1c1c1e;color:#f2f2f7;font:16px 'Segoe UI',sans-serif}
+        main{max-width:520px;padding:34px;border:1px solid #49404a;border-radius:18px;background:#28242b}h1{font-size:26px}p{color:#c5bdc7;line-height:1.6}</style>
+        <main><h1>Private browsing</h1><p>Pages in this window are not written to baka's history. Close the private window to discard its cookies, site storage, and temporary profile.</p></main>
+        """;
 
     static string Esc(string s) => System.Net.WebUtility.HtmlEncode(s);
     static string Host(string url) => Uri.TryCreate(url, UriKind.Absolute, out var u) ? u.Host : "";
@@ -870,62 +1543,3 @@ sealed class BrowserForm : Form
     }
 }
 
-/// An extension's own popup HTML in a rounded panel under its toolbar button. The WebView is created
-/// on open and disposed on close, so its renderer only exists while the panel is up.
-sealed class ExtensionPopup : Form
-{
-    readonly WebView2 _view = new() { Dock = DockStyle.Fill, DefaultBackgroundColor = Theme.Content };
-    readonly Point _want;
-    bool _ready;
-
-    public ExtensionPopup(CoreWebView2Environment env, string url, Point bottomRight)
-    {
-        _want = bottomRight;
-        FormBorderStyle = FormBorderStyle.None;
-        ShowInTaskbar = false;
-        StartPosition = FormStartPosition.Manual;
-        BackColor = Theme.Content;
-        ClientSize = new Size(380, 460);
-        Location = Fit(ClientSize);
-        Controls.Add(_view);
-        Deactivate += (_, _) => { if (_ready) Close(); };
-        FormClosed += (_, _) => _view.Dispose();
-        Shown += (_, _) => Theme.Glass(this);      // rounded corners and a dark frame, same as the window
-        _ = OpenAsync(env, url);
-    }
-
-    Point Fit(Size size)
-    {
-        var work = Screen.FromPoint(_want).WorkingArea;
-        return new Point(
-            Math.Clamp(_want.X - size.Width, work.Left, Math.Max(work.Left, work.Right - size.Width)),
-            Math.Clamp(_want.Y, work.Top, Math.Max(work.Top, work.Bottom - size.Height)));
-    }
-
-    async Task OpenAsync(CoreWebView2Environment env, string url)
-    {
-        try { await _view.EnsureCoreWebView2Async(env); }
-        catch { Close(); return; }
-        _ready = true;
-        var core = _view.CoreWebView2!;
-        core.Settings.IsStatusBarEnabled = false;
-        core.NavigationCompleted += async (_, _) => await FitToContentAsync(core);
-        try { core.Navigate(url); } catch { Close(); }
-    }
-
-    /// Extension popups size themselves to their content, so ask the document how big it wants to be.
-    async Task FitToContentAsync(CoreWebView2 core)
-    {
-        try
-        {
-            using var doc = JsonDocument.Parse(await core.ExecuteScriptAsync(
-                "[document.documentElement.scrollWidth,document.documentElement.scrollHeight]"));
-            var scale = DeviceDpi / 96f;
-            ClientSize = new Size(
-                Math.Clamp((int)(doc.RootElement[0].GetDouble() * scale) + 2, 260, 800),
-                Math.Clamp((int)(doc.RootElement[1].GetDouble() * scale) + 2, 140, 820));
-            Location = Fit(ClientSize);
-        }
-        catch { }
-    }
-}
