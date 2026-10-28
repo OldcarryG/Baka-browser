@@ -11,7 +11,8 @@ static class Args
     static string[] _all = [];
     public static void Set(string[] args) => _all = args;
     public static bool Has(string flag) => _all.Contains(flag);
-    public static string[] Urls => [.. _all.Where(a => !a.StartsWith('-'))];
+    // The folder after --profile-dir is a value, not a page to open.
+    public static string[] Urls => [.. _all.Where((a, i) => !a.StartsWith('-') && !(i > 0 && _all[i - 1] == "--profile-dir"))];
 
     public static double? Number(string prefix) =>
         _all.FirstOrDefault(a => a.StartsWith(prefix)) is { } a &&
@@ -24,8 +25,18 @@ static class App
     public const string Name = "baka";
 
     // Not just "baka": another app already owns %LOCALAPPDATA%\baka on some machines.
-    public static readonly string DataDir = Path.Combine(
+    // `--profile-dir <folder>` runs a separate profile (testing a build without touching the real one).
+    public static readonly string DataDir = ProfileOverride() ?? Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "baka-browser");
+
+    static string? ProfileOverride()
+    {
+        var args = Environment.GetCommandLineArgs();
+        for (int i = 1; i < args.Length - 1; i++)
+            if (args[i] == "--profile-dir" && !string.IsNullOrWhiteSpace(args[i + 1]))
+                return Path.GetFullPath(args[i + 1]);
+        return null;
+    }
 
     public static string Path_(params string[] parts) => Path.Combine([DataDir, .. parts]);
 
