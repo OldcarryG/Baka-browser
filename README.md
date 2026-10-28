@@ -8,6 +8,10 @@ A small, private Windows browser with Chrome Web Store extensions, a compact gra
 |---|---|---|
 | ![Add to Baka on a Chrome Web Store page](docs/screenshots/web-store.png) | ![Extensions menu](docs/screenshots/extensions-menu.png) | ![Settings](docs/screenshots/settings.png) |
 
+| uBlock Origin Lite built in (1.5) | Extension popups | Performance settings (1.5) |
+|---|---|---|
+| ![Settings > Extensions with the ad blocker switch and uBlock Origin Lite installed](docs/screenshots/settings-extensions.png) | ![Dark Reader popup opened from the puzzle button](docs/screenshots/extension-popup.png) | ![Settings > Performance](docs/screenshots/settings-performance.png) |
+
 **[Download the latest release](https://github.com/OldcarryG/Baka-browser/releases/latest)**: run `BakaBrowser-win-Setup.exe`.
 
 ## Install
@@ -27,6 +31,8 @@ The installer and update packages are not Authenticode-signed in this repository
 - **Tabs and window controls:** Place tabs on the left or top, collapse the left tab rail, and restore up to 50 regular tabs from the previous session.
 - **Fullscreen:** Choose true fullscreen or maximize the page while keeping browser controls visible.
 - **Privacy:** WebView2 tracking prevention, built-in host rules, optional downloaded ad/tracker domains, Do Not Track and Global Privacy Control signals, JavaScript and image switches, and site-data clearing.
+- **uBlock Origin Lite by default:** New profiles get the free, open-source [uBlock Origin Lite](https://github.com/uBlockOrigin/uBOL-home) from the Chrome Web Store on first start, for element hiding and filter-list blocking. It is added once; removing it is respected. Switch: Settings > Extensions > Ad blocker.
+- **Uploads and 4K video:** The UI test uploads a photo and a 40 MB video by form, `fetch` and chunked XHR, and checks 4K60 VP9, AV1 and H.264 decoding (hardware decoding on a supported GPU). HEVC needs Microsoft's HEVC codec.
 - **Ad and tracker blocking:** Built-in and custom rules block whole domains. Settings can manually download the [StevenBlack hosts list](https://github.com/StevenBlack/hosts), keep it locally, and remove it later. The update sends a request to GitHub for the list; it does not include visited URLs or tab data.
 - **Site exceptions:** Allowed domains bypass matching block rules for that domain and its subdomains.
 - **Private windows:** Open from the toolbar or with `Ctrl+Shift+N`. Private browsing uses a temporary WebView2 profile and does not save history, session tabs, or dashboard edits. Downloaded files remain where you save them.
@@ -78,7 +84,7 @@ See [GITHUB_UPLOAD_GUIDE.md](GITHUB_UPLOAD_GUIDE.md) for the safe, step-by-step 
 - The rendering engine is WebView2 (Chromium). Extensions run with WebView2's extension support, which covers most but not all Chrome extension APIs.
 - The included installer targets Windows x64 only. There is no macOS or Linux build.
 - Windows may show a SmartScreen warning until the release is signed with a trusted code-signing certificate.
-- Idle-tab suspension is best-effort and controlled in Settings. It reduces background work but does not cap the memory used by an active page.
+- Background tabs ask WebView2 to trim memory (`MemoryUsageTargetLevel = Low`) as soon as they are hidden. Idle-tab suspension is best-effort and controlled in Settings. It reduces background work but does not cap the memory used by an active page.
 - The browser has no bookmark folders, built-in proxy, or cloud sync.
 
 ## License

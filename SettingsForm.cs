@@ -169,6 +169,9 @@ sealed class SettingsForm : Form
         Buttons(("Open Chrome Web Store", Theme.Store, () => { _extensions.OpenWebStore(); Close(); }),
             ("Install unpacked extension…", Theme.Folder, ChooseExtensionFolder));
         Note("On an extension's Web Store page, press Add to Baka on the toolbar. Baka downloads the package from Google, checks its signature, shows what it can access, and installs it after you agree. Extensions can read or change site data within their permissions, so add only ones you trust. Extensions don't update by themselves yet: to update one, remove it and add it again.");
+        Card("Ad blocker");
+        Toggle("Add uBlock Origin Lite on first start", Config.Current.InstallDefaultAdBlocker,
+            v => Config.Current.InstallDefaultAdBlocker = v, "Free and open source; added once, removing it is respected");
         Card("Installed");
         _extensionsList = _card;
         Note("Loading…");
@@ -197,7 +200,7 @@ sealed class SettingsForm : Form
         Page("Performance", Theme.Lightning, "Memory use and page zoom.");
         Card("Memory");
         Spinner("Sleep hidden tabs after (minutes, 0 = never)", Config.Current.IdleMinutes, v => Config.Current.IdleMinutes = v);
-        Note("Hidden tabs that are not loading or playing audio are put to sleep and wake when you select them.");
+        Note("Hidden tabs that are not loading or playing audio are put to sleep and wake when you select them. Background tabs also ask the engine to trim caches right away.");
         Card("Zoom");
         var zooms = new[] { "80%", "90%", "100%", "110%", "125%", "150%" };
         var current = $"{Math.Round(Config.Current.ZoomFactor * 100)}%";

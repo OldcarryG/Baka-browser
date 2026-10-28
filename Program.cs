@@ -178,6 +178,10 @@ sealed class Config
     /// 0 for settings written before 1.4. Version 2 moved the old default look (Dark + blue accent)
     /// to the BAKA theme once; anything the user picked themselves is left alone.
     public int SettingsVersion { get; set; }
+    /// Add uBlock Origin Lite on first start (1.5). DefaultAdBlockerAdded records that it was done once,
+    /// so removing the extension is respected.
+    public bool InstallDefaultAdBlocker { get; set; } = true;
+    public bool DefaultAdBlockerAdded { get; set; }
 
     [JsonIgnore] public static Config Current { get; private set; } = new();
     public const int CurrentSettingsVersion = 2;

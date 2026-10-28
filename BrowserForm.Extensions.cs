@@ -167,6 +167,41 @@ sealed partial class BrowserForm
         }
     }
 
+    /// uBlock Origin Lite (free, open source, Manifest V3) from the Chrome Web Store.
+    internal const string DefaultAdBlockerId = "ddkjiahejlhfcafbddmgiahcphecmpfh";
+
+    /// Adds uBlock Origin Lite once, on the first start with extensions available. It is tried once per
+    /// profile: if the user later removes it, it stays removed. Turned off with Settings > Privacy.
+    async Task EnsureDefaultAdBlockerAsync()
+    {
+        if (!_extensionsAvailable || _privateBrowsing || !Config.Current.InstallDefaultAdBlocker
+            || Config.Current.DefaultAdBlockerAdded || Profile is not { } profile) return;
+        ExtensionPackage? package = null;
+        try
+        {
+            if (!(await profile.GetBrowserExtensionsAsync()).Any(e => e.Id == DefaultAdBlockerId))
+            {
+                var engine = WebStore.EngineVersion(CoreWebView2Environment.GetAvailableBrowserVersionString());
+                package = await WebStore.DownloadAsync(DefaultAdBlockerId, engine);
+                var folder = WebStore.Commit(package);
+                package = null;
+                var ext = await profile.AddBrowserExtensionAsync(folder);
+                var index = WebStore.LoadIndex();
+                index[ext.Id] = folder;
+                WebStore.SaveIndex(index);
+                _installedExtensionIds.Add(ext.Id);
+            }
+            Config.Current.DefaultAdBlockerAdded = true;
+            Config.Current.Save();
+            UpdateStoreButton();
+        }
+        catch
+        {
+            // Offline or the store is unreachable: try again on the next start.
+            if (package is not null) WebStore.Discard(package);
+        }
+    }
+
     // ---------- extensions menu and popups ----------
 
     async Task ShowExtensionsMenuAsync()

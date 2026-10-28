@@ -437,7 +437,12 @@ sealed partial class BrowserForm : Form, IExtensionHost
             try { await ListExtensionsAsync(); } catch { }   // fills the "already added" state of the store button
 
         _idleTimer.Start();
-        if (Args.Value("--ui-test") is { } testDir) _ = RunUiTestAsync(testDir);
+        if (Args.Value("--ui-test") is { } testDir)
+        {
+            await EnsureDefaultAdBlockerAsync();   // the test checks the first-run result
+            _ = RunUiTestAsync(testDir);
+        }
+        else _ = EnsureDefaultAdBlockerAsync();
         if (!_privateBrowsing && Config.Current.AutoUpdateEnabled) _updateTimer.Start();
     }
 
@@ -1085,6 +1090,13 @@ sealed partial class BrowserForm : Form, IExtensionHost
             var t = _open[i];
             var active = i == _tabs.SelectedIndex;
             t.View.Visible = active;
+            // Background tabs ask the engine to trim memory (caches, decoded images); the visible one runs normally.
+            if (t.View.CoreWebView2 is { } levelCore)
+            {
+                var level = active ? Microsoft.Web.WebView2.Core.CoreWebView2MemoryUsageTargetLevel.Normal
+                                   : Microsoft.Web.WebView2.Core.CoreWebView2MemoryUsageTargetLevel.Low;
+                try { if (levelCore.MemoryUsageTargetLevel != level) levelCore.MemoryUsageTargetLevel = level; } catch { }
+            }
             if (!active) continue;
             t.SuspendRetryAfterUtc = DateTime.MinValue;
             if (t.View.CoreWebView2 is { } activeCore && activeCore.IsSuspended)

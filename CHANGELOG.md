@@ -2,6 +2,17 @@
 
 Notable changes to Baka Browser are recorded here. Versions are published as GitHub Releases by pushing a matching `vMAJOR.MINOR.PATCH` tag.
 
+## [1.5.0] - 2026-10-28
+
+### Added
+
+- uBlock Origin Lite is added from the Chrome Web Store on first start (once per profile; removal is respected). Setting: Settings > Extensions > Ad blocker.
+- `--ui-test` uploads a 3 MB photo and a 40 MB video through a page file input by form, `fetch`/`FormData` and chunked `XMLHttpRequest`, and reports 4K VP9/AV1/H.264/HEVC decoding support.
+
+### Changed
+
+- Background tabs run with WebView2 `MemoryUsageTargetLevel = Low`; the selected tab is set back to Normal.
+
 ## [1.4.0] - 2026-10-28
 
 ### Added

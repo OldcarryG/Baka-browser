@@ -109,6 +109,8 @@ sealed partial class BrowserForm
             // 3. Chrome Web Store: Add to Baka, real download, signature check, install
             if (_extensionsAvailable)
             {
+                Step(Config.Current.DefaultAdBlockerAdded && (await ListExtensionsAsync()).Any(e => e.Id == DefaultAdBlockerId),
+                    "a new profile gets uBlock Origin Lite on first start");
                 await Go($"https://chromewebstore.google.com/detail/dark-reader/{DarkReaderId}", 4000);
                 Step(_storeButton.Visible, "Add to Baka appears on a Chrome Web Store extension page");
                 Shot("web-store");
@@ -127,8 +129,10 @@ sealed partial class BrowserForm
                 Step(list.Any(e => e.Id == DarkReaderId) && list.Any(e => e.Id == UBlockLiteId), "both extensions are listed");
                 Step(list.All(e => !BuiltInExtensionIds.Contains(e.Id)), "WebView2's own built-in extensions are not listed");
                 Note($"tabs after install: {string.Join(" | ", _open.Select(t => t.View.CoreWebView2?.Source))}");
+                // Dark Reader opens its help page in a new tab shortly after install; let that happen first.
+                await Wait(2500);
                 if (testTab is not null && _open.Contains(testTab)) _tabs.Select(_open.IndexOf(testTab));
-                await Wait(400);
+                await Wait(600);
                 UpdateStoreButton();
                 Step(_storeButton.Text == "Added to Baka" && !_storeButton.Enabled, "the store button changes to Added to Baka");
                 Shot("web-store-added");
@@ -188,6 +192,9 @@ sealed partial class BrowserForm
                 await SetExtensionEnabledAsync(UBlockLiteId, true);
                 Step((await ListExtensionsAsync()).First(e => e.Id == UBlockLiteId).Enabled, "and turned back on");
             }
+
+            // 7b. uploads and 4K video, against a local test server
+            await RunMediaChecksAsync(Step, Note, Go, Eval, Wait, reportDir);
 
             // 8. every settings page
             var settings = new SettingsForm(_privateBrowsing, ClearSiteDataAsync, this, UpdateRecommendedBlocklistAsync,
