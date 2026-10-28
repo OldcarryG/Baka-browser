@@ -611,6 +611,19 @@ static class SelfCheck
         Check(Url.From("  ", search) == "about:blank", "blank input");
         Check(Url.From("mailto:a@b.com", search) == "mailto:a@b.com", "non-web scheme passed through");
 
+        // "Choose image or video…" copies the picked file into a folder that a new profile does not have yet.
+        try
+        {
+            var root = Path.Combine(Path.GetTempPath(), "baka-selfcheck-" + Guid.NewGuid().ToString("N"));
+            var source = Path.Combine(Path.GetTempPath(), "baka-selfcheck-source.bin");
+            File.WriteAllBytes(source, [1, 2, 3]);
+            var target = Path.Combine(root, "home-assets", "home-background.png");
+            SettingsForm.ReplaceManagedFile(source, target);
+            Check(File.Exists(target) && new FileInfo(target).Length == 3, "new-tab background is copied into a missing folder");
+            Directory.Delete(root, true); File.Delete(source);
+        }
+        catch (Exception e) { Check(false, "new-tab background copy: " + e.Message); }
+
         // The address bar's security mark. A padlock on an http page would be a lie, so it gets a test.
         Check(OmniBox.Mark("https://example.com") == Theme.Lock, "https shows the padlock");
         Check(OmniBox.Mark("http://example.com") == Theme.Insecure, "http shows the warning mark");

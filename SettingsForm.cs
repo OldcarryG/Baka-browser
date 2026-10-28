@@ -647,10 +647,13 @@ sealed class SettingsForm : Form
         BakaDialog.Info(this, "List removed", "The downloaded ad and tracker domains were removed.");
     }
 
-    static void ReplaceManagedFile(string source, string destination)
+    internal static void ReplaceManagedFile(string source, string destination)
     {
         if (Path.GetFullPath(source).Equals(Path.GetFullPath(destination), StringComparison.OrdinalIgnoreCase)) return;
-        Directory.CreateDirectory(App.DataDir);
+        // The destination folder (for example home-assets for the new-tab background) may not exist yet on
+        // a new profile: creating only the data folder made "Choose image or video…" fail with
+        // "Could not find a part of the path ...\baka-browser\home-assets\home-background.jpg.tmp".
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(destination))!);
         var temp = destination + ".tmp";
         File.Copy(source, temp, overwrite: true);
         File.Move(temp, destination, overwrite: true);

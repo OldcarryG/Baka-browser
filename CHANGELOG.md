@@ -2,6 +2,12 @@
 
 Notable changes to Baka Browser are recorded here. Versions are published as GitHub Releases by pushing a matching `vMAJOR.MINOR.PATCH` tag.
 
+## [1.6.1] - 2026-10-28
+
+### Fixed
+
+- Settings > Appearance > "Choose image or video…" for the new-tab background failed on a new profile with "Could not find a part of the path …\baka-browser\home-assets\…". The folder the file is copied into is now created first. A self-check covers it.
+
 ## [1.6.0] - 2026-10-28
 
 ### Added
