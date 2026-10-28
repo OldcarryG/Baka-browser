@@ -11,8 +11,14 @@ static class Args
     static string[] _all = [];
     public static void Set(string[] args) => _all = args;
     public static bool Has(string flag) => _all.Contains(flag);
-    // The folder after --profile-dir is a value, not a page to open.
-    public static string[] Urls => [.. _all.Where((a, i) => !a.StartsWith('-') && !(i > 0 && _all[i - 1] == "--profile-dir"))];
+    static readonly string[] ValueFlags = ["--profile-dir", "--ui-test"];
+    // The folder after --profile-dir or --ui-test is a value, not a page to open.
+    public static string[] Urls => [.. _all.Where((a, i) => !a.StartsWith('-') && !(i > 0 && ValueFlags.Contains(_all[i - 1])))];
+    public static string? Value(string flag)
+    {
+        var i = Array.IndexOf(_all, flag);
+        return i >= 0 && i + 1 < _all.Length ? _all[i + 1] : null;
+    }
 
     public static double? Number(string prefix) =>
         _all.FirstOrDefault(a => a.StartsWith(prefix)) is { } a &&
@@ -132,7 +138,7 @@ static class App
                     App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
         Application.Run(new BrowserForm(Args.Urls, Args.Has("--private")));
-        return 0;
+        return Environment.ExitCode;   // the --ui-test run reports its failure count here
     }
 }
 
@@ -167,8 +173,14 @@ sealed class Config
     public string DashboardNotes { get; set; } = "";
     public List<DashboardTask> DashboardTasks { get; set; } = [];
     public List<string> DashboardWidgets { get; set; } = ["clock", "quicklinks", "notes", "tasks", "privacy"];
+    /// Zoom applied to every page, 0.5 to 3.0. Changed with Ctrl+plus / Ctrl+minus / Ctrl+0.
+    public double ZoomFactor { get; set; } = 1.0;
+    /// 0 for settings written before 1.4. Version 2 moved the old default look (Dark + blue accent)
+    /// to the BAKA theme once; anything the user picked themselves is left alone.
+    public int SettingsVersion { get; set; }
 
     [JsonIgnore] public static Config Current { get; private set; } = new();
+    public const int CurrentSettingsVersion = 2;
 
     static string File_ => App.Path_("settings.json");
 
@@ -187,7 +199,16 @@ sealed class Config
 
         if (Current.ThemeMode is not ("Baka" or "Dark" or "Light" or "Custom")) Current.ThemeMode = "Baka";
         if (!System.Text.RegularExpressions.Regex.IsMatch(Current.AccentColor ?? "", "^#[0-9A-Fa-f]{6}$"))
-            Current.AccentColor = "#0A84FF";
+            Current.AccentColor = "#E4E4E7";
+        if (Current.SettingsVersion < 2)
+        {
+            // Releases before 1.3 shipped Dark with a blue accent as the default; those users never chose
+            // it, so they move to BAKA like new installs. Light and Custom were always explicit choices.
+            if (Current.ThemeMode == "Dark" && string.Equals(Current.AccentColor, "#0A84FF", StringComparison.OrdinalIgnoreCase))
+                (Current.ThemeMode, Current.AccentColor) = ("Baka", "#E4E4E7");
+            Current.SettingsVersion = CurrentSettingsVersion;
+        }
+        if (!double.IsFinite(Current.ZoomFactor) || Current.ZoomFactor is < 0.25 or > 5) Current.ZoomFactor = 1.0;
         if (!System.Text.RegularExpressions.Regex.IsMatch(Current.CustomBackgroundColor ?? "", "^#[0-9A-Fa-f]{6}$"))
             Current.CustomBackgroundColor = "#30243B";
         if (Current.BookmarksPosition is not ("Left" or "Top")) Current.BookmarksPosition = "Left";
@@ -629,6 +650,77 @@ static class SelfCheck
 
         Check(History.Worth("https://example.com/page"), "http(s) pages are remembered");
         Check(!History.Worth("about:blank"), "about:blank is not history");
+
+        // Chrome Web Store: page URLs, package parsing, signature and ID checks, zip-slip guard.
+        const string dr = "eimadpbcbfnmbkopoojfekhnkhdbieeh";
+        Check(WebStore.IdFromUrl($"https://chromewebstore.google.com/detail/dark-reader/{dr}") == dr, "store detail URL gives the extension ID");
+        Check(WebStore.IdFromUrl($"https://chromewebstore.google.com/detail/{dr}?hl=en") == dr, "store URL without a name gives the ID");
+        Check(WebStore.IdFromUrl($"https://chrome.google.com/webstore/detail/dark-reader/{dr}") == dr, "old store URL gives the ID");
+        Check(WebStore.IdFromUrl("https://chromewebstore.google.com/category/extensions") is null, "store category page has no ID");
+        Check(WebStore.IdFromUrl($"https://evil.example/detail/x/{dr}") is null, "other sites are never treated as the store");
+        Check(WebStore.IdFromUrl($"http://chromewebstore.google.com/detail/x/{dr}") is null, "plain-http store URL is refused");
+        Check(WebStore.EngineVersion("156.0.4314.50 (Official build)") == "156.0.4314.50", "engine version for the update service");
+        Check(WebStore.DownloadUrl(dr, "156.0.0.0").StartsWith("https://clients2.google.com/service/update2/crx?", StringComparison.Ordinal), "packages come from Google's update service over HTTPS");
+        var tempRoot = Path.Combine(Path.GetTempPath(), "baka-selfcheck-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            using var rsa = System.Security.Cryptography.RSA.Create(2048);
+            var key = rsa.ExportSubjectPublicKeyInfo();
+            var id = WebStore.IdFromPublicKey(key);
+            Check(WebStore.IsValidId(id), "IDs from public keys use the a-p alphabet");
+            byte[] Zip(params (string Name, string Text)[] files)
+            {
+                using var ms = new MemoryStream();
+                using (var zip = new System.IO.Compression.ZipArchive(ms, System.IO.Compression.ZipArchiveMode.Create, true))
+                    foreach (var (name, text) in files)
+                    {
+                        using var w = new StreamWriter(zip.CreateEntry(name).Open());
+                        w.Write(text);
+                    }
+                return ms.ToArray();
+            }
+            byte[] Crx3(byte[] archive, byte[] crxIdBytes, Func<byte[], byte[]>? tamper = null)
+            {
+                using var sd = new MemoryStream();
+                Protobuf.WriteBytes(sd, 1, crxIdBytes);
+                var signed = sd.ToArray();
+                var message = new List<byte>();
+                message.AddRange(Encoding.ASCII.GetBytes("CRX3 SignedData\0"));
+                message.AddRange(BitConverter.GetBytes((uint)signed.Length));
+                message.AddRange(signed);
+                message.AddRange(archive);
+                var sig = rsa.SignData(message.ToArray(), System.Security.Cryptography.HashAlgorithmName.SHA256, System.Security.Cryptography.RSASignaturePadding.Pkcs1);
+                using var proof = new MemoryStream();
+                Protobuf.WriteBytes(proof, 1, key);
+                Protobuf.WriteBytes(proof, 2, sig);
+                using var header = new MemoryStream();
+                Protobuf.WriteBytes(header, 2, proof.ToArray());
+                Protobuf.WriteBytes(header, 10000, signed);
+                var h = header.ToArray();
+                var body = tamper is null ? archive : tamper(archive);
+                return [.. "Cr24"u8.ToArray(), .. BitConverter.GetBytes(3u), .. BitConverter.GetBytes((uint)h.Length), .. h, .. body];
+            }
+            var idBytes = System.Security.Cryptography.SHA256.HashData(key)[..16];
+            var good = Zip(("manifest.json", "{\"name\":\"__MSG_n__\",\"version\":\"1.0\",\"manifest_version\":3,\"default_locale\":\"en\",\"action\":{\"default_popup\":\"popup.html\"},\"options_page\":\"/opt.html\",\"permissions\":[\"tabs\"],\"host_permissions\":[\"<all_urls>\"]}"),
+                ("_locales/en/messages.json", "{\"n\":{\"message\":\"Test Extension\"}}"), ("popup.html", "<p>hi</p>"));
+            var dir1 = Path.Combine(tempRoot, "a");
+            WebStore.Unpack(Crx3(good, idBytes), dir1, id);
+            var manifest = WebStore.ReadManifest(dir1);
+            Check(manifest?["key"]?.GetValue<string>() == Convert.ToBase64String(key), "a signed package unpacks and keeps its store key");
+            Check(manifest is not null && WebStore.Localize(dir1, manifest, manifest["name"]?.GetValue<string>()) == "Test Extension", "__MSG_ names are localised");
+            var pages = WebStore.Pages(dir1);
+            Check(pages.Popup == "popup.html" && pages.Options == "opt.html", "popup and options pages are read from the manifest");
+            Check(manifest is not null && WebStore.DescribePermissions(manifest).Contains("Read and change all your data on all websites"), "broad host access is spelled out before install");
+            bool Throws(Action a) { try { a(); return false; } catch { return true; } }
+            Check(Throws(() => WebStore.Unpack(Crx3(good, idBytes), Path.Combine(tempRoot, "b"), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")), "a package for a different ID is refused");
+            Check(Throws(() => WebStore.Unpack(Crx3(good, idBytes, z => { var c = (byte[])z.Clone(); c[^5] ^= 0xFF; return c; }), Path.Combine(tempRoot, "c"), id)), "a tampered package is refused");
+            var slip = Zip(("manifest.json", "{\"name\":\"x\",\"version\":\"1\"}"), ("../escape.txt", "x"));
+            Check(Throws(() => WebStore.Unpack(Crx3(slip, idBytes), Path.Combine(tempRoot, "d"), id)) && !File.Exists(Path.Combine(tempRoot, "escape.txt")), "zip entries outside the folder are refused");
+            Check(Throws(() => WebStore.Unpack(Encoding.ASCII.GetBytes("<html>not a crx</html>"), Path.Combine(tempRoot, "e"))), "a web page instead of a package is refused");
+        }
+        catch (Exception ex) { Check(false, "Web Store package checks: " + ex.Message); }
+        finally { try { Directory.Delete(tempRoot, true); } catch { } }
+
         Console.WriteLine(fails == 0 ? "all passed" : $"{fails} failed");
         return fails;
     }

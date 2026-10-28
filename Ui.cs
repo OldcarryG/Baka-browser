@@ -1,4 +1,4 @@
-using System.Drawing.Drawing2D;
+﻿using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
 
 namespace Baka;
@@ -39,9 +39,15 @@ static class Theme
     public static bool DarkMode => CustomMode ? Luminance(CustomSurface) < 0.18 : Config.Current.ThemeMode != "Light";
 
     /// Black once the backdrop is up, a flat near-black on older Windows where it is not.
+    /// BAKA is always opaque graphite: the BAKA Windows desktop has no see-through chrome either.
     public static Color ChromeBg => CustomMode ? Blend(CustomSurface, DarkMode ? Color.Black : Color.White, 0.12f)
+        : BakaMode ? Hex(0x0E0E10)
         : GlassOn ? (DarkMode ? Color.Black : Color.White) : DarkMode
             ? Color.FromArgb(0x24, 0x24, 0x26) : Color.FromArgb(0xF7, 0xF7, 0xF9);
+
+    /// The Mica backdrop and the gradient "glass" highlights. BAKA turns both off for flat, crisp
+    /// surfaces that match the desktop; the other themes keep the setting.
+    public static bool GlassStyle => Config.Current.LiquidGlassEnabled && !BakaMode && !CustomMode;
 
     // Dark and light system palettes. Custom keeps the dark surfaces and changes the accent.
     public static Color Content => CustomMode ? CustomSurface : BakaMode ? Hex(0x161619)
@@ -49,13 +55,13 @@ static class Theme
     /// The tab row has to be opaque (see TabStrip), so it cannot be glass — but Content is twice as
     /// bright as Mica-over-black measures (~#0D0A0E here), which read as a pale band across the top.
     /// This is close enough to the backdrop that the seam disappears.
-    public static Color Strip => CustomMode ? Blend(Content, DarkMode ? Color.Black : Color.White, 0.22f) : BakaMode ? Hex(0x0B0B0D)
+    public static Color Strip => CustomMode ? Blend(Content, DarkMode ? Color.Black : Color.White, 0.22f) : BakaMode ? Hex(0x09090B)
         : DarkMode ? Color.FromArgb(0x10, 0x10, 0x12) : Color.FromArgb(0xEF, 0xEF, 0xF3);
-    public static Color Fill1 => CustomMode ? Blend(Content, DarkMode ? Color.White : Color.Black, 0.07f) : BakaMode ? Hex(0x1F1F23)
+    public static Color Fill1 => CustomMode ? Blend(Content, DarkMode ? Color.White : Color.Black, 0.07f) : BakaMode ? Hex(0x1C1C20)
         : DarkMode ? Color.FromArgb(0x2C, 0x2C, 0x2E) : Color.White;
-    public static Color Fill2 => CustomMode ? Blend(Content, DarkMode ? Color.White : Color.Black, 0.14f) : BakaMode ? Hex(0x27272A)
+    public static Color Fill2 => CustomMode ? Blend(Content, DarkMode ? Color.White : Color.Black, 0.14f) : BakaMode ? Hex(0x26262B)
         : DarkMode ? Color.FromArgb(0x3A, 0x3A, 0x3C) : Color.FromArgb(0xF2, 0xF2, 0xF6);
-    public static Color Fill3 => CustomMode ? Blend(Content, DarkMode ? Color.White : Color.Black, 0.22f) : BakaMode ? Hex(0x34343A)
+    public static Color Fill3 => CustomMode ? Blend(Content, DarkMode ? Color.White : Color.Black, 0.22f) : BakaMode ? Hex(0x33333A)
         : DarkMode ? Color.FromArgb(0x48, 0x48, 0x4A) : Color.FromArgb(0xE5, 0xE5, 0xEA);
     public static Color Text => BakaMode ? Hex(0xFAFAFA) : DarkMode ? Color.FromArgb(0xF2, 0xF2, 0xF7) : Color.FromArgb(0x1C, 0x1C, 0x1E);
     /// secondaryLabel, which on Apple's dark backgrounds is white at 60% rather than systemGray:
@@ -76,7 +82,7 @@ static class Theme
             return _accentColor;
         }
     }
-    public static Color Line => CustomMode ? Blend(Content, DarkMode ? Color.White : Color.Black, 0.28f) : BakaMode ? Hex(0x3F3F46)
+    public static Color Line => CustomMode ? Blend(Content, DarkMode ? Color.White : Color.Black, 0.28f) : BakaMode ? Hex(0x2E2E35)
         : DarkMode ? Color.FromArgb(0x38, 0x38, 0x3A) : Color.FromArgb(0xD1, 0xD1, 0xD6);
     /// systemRed, lightened. This keeps error and warning text readable against a card background.
     public static Color Bad => DarkMode ? Color.FromArgb(0xFF, 0x69, 0x61) : Color.FromArgb(0xD7, 0x00, 0x15);
@@ -98,6 +104,9 @@ static class Theme
 
     // Radii: Apple's toolbars sit around 8-10 for controls, more for panels.
     public static readonly int R = S(9);
+
+    // Compact chrome metrics, shared by the toolbar, tab rail and sidebars.
+    public static readonly int BarHeight = S(40), ButtonSize = S(30), RailRow = S(36), RailRowHeight = S(32);
 
     /// WCAG relative-luminance contrast ratio, 1.0 to 21.0. Text wants 4.5 or better, an icon or a
     /// border 3.0; the palette is checked against those in --self-check rather than by eye.
@@ -143,6 +152,124 @@ static class Theme
     // Window controls, because the title bar that used to hold them is gone.
     public const string Min = "", Max = "", Restore = "";
 
+    // Menus, settings navigation and extensions. All exist in Segoe MDL2 Assets and Segoe Fluent Icons.
+    /// A real shield (the older Shield constant is the padlock glyph, which read as "secure page").
+    public const string ShieldIcon = "\uEA18";
+    public const string Puzzle = "\uEA86", More = "\uE712", Download = "\uE896", HistoryIcon = "\uE81C",
+        ChevronLeft = "\uE76B", ChevronRight = "\uE76C", Home = "\uE80F", Info = "\uE946", Folder = "\uE8B7",
+        Delete = "\uE74D", Paint = "\uE790", Lightning = "\uE945", Code = "\uE943", BookmarkList = "\uE728",
+        Tabs = "\uE7C4", Print = "\uE749", ZoomIn = "\uE8A3", ZoomOut = "\uE71F", Store = "\uE719",
+        Check = "\uE73E", Sync = "\uE895", OpenNew = "\uE8A7", Copy = "\uE8C8", Picture = "\uE8B9",
+        Mouse = "\uE962", Link = "\uE71B", Window = "\uE737";
+
+    /// A glyph rendered once into a bitmap, for places that take an Image (menu items). Cached by
+    /// glyph, size and colour; the cache is cleared when the theme changes.
+    static readonly Dictionary<(string, int, int), Bitmap> _glyphImages = [];
+    public static Image GlyphImage(string glyph, Color? color = null, float points = 10f)
+    {
+        var c = color ?? Text;
+        var key = (glyph, (int)(points * 10), c.ToArgb());
+        if (_glyphImages.TryGetValue(key, out var cached)) return cached;
+        var n = S(16);
+        var bmp = new Bitmap(n, n);
+        using (var g = Graphics.FromImage(bmp))
+        using (var font = new Font(IconFamily, points, GraphicsUnit.Point))
+        {
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+            Draw.Glyph(g, glyph, font, c, new RectangleF(0, 0, n, n));
+        }
+        _glyphImages[key] = bmp;
+        return bmp;
+    }
+
+    public static void ResetGlyphCache()
+    {
+        foreach (var b in _glyphImages.Values) b.Dispose();
+        _glyphImages.Clear();
+    }
+
+    /// Menus in the BAKA palette: graphite sheet, hairline border, rounded hover row.
+    public static void Style(ToolStripDropDown menu)
+    {
+        menu.Renderer = new MenuRenderer();
+        menu.BackColor = Fill1;
+        menu.ForeColor = Text;
+        menu.Font = Ui;
+        menu.Padding = new Padding(S(4), S(6), S(4), S(6));
+        if (menu is ToolStripDropDownMenu m) { m.ShowImageMargin = true; m.ShowCheckMargin = false; }
+        foreach (ToolStripItem item in menu.Items) StyleItem(item);
+    }
+
+    public static void StyleItem(ToolStripItem item)
+    {
+        item.ForeColor = item.Enabled ? Text : Muted;
+        if (item is ToolStripMenuItem mi)
+        {
+            mi.Padding = new Padding(S(2), S(5), S(2), S(5));
+            if (mi.DropDown is { } sub && mi.HasDropDownItems) Style(sub);
+        }
+    }
+
+    sealed class MenuRenderer : ToolStripProfessionalRenderer
+    {
+        public MenuRenderer() : base(new MenuColors()) { RoundedEdges = false; }
+
+        protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e)
+        {
+            using var b = new SolidBrush(Fill1);
+            e.Graphics.FillRectangle(b, e.AffectedBounds);
+        }
+
+        protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e)
+        {
+            using var p = new Pen(Line);
+            e.Graphics.DrawRectangle(p, 0, 0, e.ToolStrip.Width - 1, e.ToolStrip.Height - 1);
+        }
+
+        protected override void OnRenderImageMargin(ToolStripRenderEventArgs e) { }
+
+        protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
+        {
+            if (!e.Item.Selected || !e.Item.Enabled) return;
+            var r = new RectangleF(S(2), 0, e.Item.Width - S(4), e.Item.Height);
+            Draw.Fill(e.Graphics, r, Fill2, Sf(6));
+        }
+
+        protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+        {
+            e.TextColor = e.Item.Enabled ? Text : Muted;
+            if (e.Item is ToolStripMenuItem { ShortcutKeyDisplayString: not null } && e.Text == ((ToolStripMenuItem)e.Item).ShortcutKeyDisplayString)
+                e.TextColor = Muted;
+            base.OnRenderItemText(e);
+        }
+
+        protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
+        {
+            using var p = new Pen(Line);
+            var y = e.Item.Height / 2;
+            e.Graphics.DrawLine(p, S(10), y, e.Item.Width - S(10), y);
+        }
+
+        protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e)
+        {
+            e.ArrowColor = Muted;
+            base.OnRenderArrow(e);
+        }
+    }
+
+    sealed class MenuColors : ProfessionalColorTable
+    {
+        public override Color MenuBorder => Line;
+        public override Color MenuItemBorder => Color.Transparent;
+        public override Color MenuItemSelected => Fill2;
+        public override Color ToolStripDropDownBackground => Fill1;
+        public override Color ImageMarginGradientBegin => Fill1;
+        public override Color ImageMarginGradientMiddle => Fill1;
+        public override Color ImageMarginGradientEnd => Fill1;
+        public override Color SeparatorDark => Line;
+        public override Color SeparatorLight => Line;
+    }
+
     /// Flat dark button. WinForms' stock button ignores BackColor unless FlatStyle is Flat.
     public static Button Flat(string text)
     {
@@ -186,7 +313,7 @@ static class Theme
         // window that still has one comes up in the accent colour. This pins it to the sheet colour.
         var caption = Content.B << 16 | Content.G << 8 | Content.R;   // COLORREF is 0x00BBGGRR
         DwmSetWindowAttribute(f.Handle, CaptionColor, ref caption, sizeof(int));
-        if (!backdrop || !Config.Current.LiquidGlassEnabled || CustomMode)
+        if (!backdrop || !GlassStyle)
         {
             var none = 1 /* DWMSBT_NONE */;
             DwmSetWindowAttribute(f.Handle, BackdropType, ref none, sizeof(int));
@@ -331,7 +458,7 @@ sealed class IconButton : Control
         if (Enabled && (_hot || _down))
         {
             var r = new RectangleF(pad, pad, Width - pad * 2, Height - pad * 2);
-            if (Config.Current.LiquidGlassEnabled) Draw.Glass(g, r, _down ? Theme.Fill3 : Theme.Fill2, Theme.Sf(8));
+            if (Theme.GlassStyle) Draw.Glass(g, r, _down ? Theme.Fill3 : Theme.Fill2, Theme.Sf(8));
             else Draw.Fill(g, r, _down ? Theme.Fill3 : Theme.Fill2, Theme.Sf(8));
         }
         // ShowFocusCues is false until the user actually uses the keyboard, so a mouse click does not
@@ -393,6 +520,7 @@ sealed class OmniBox : Panel
         Controls.Add(Input);
         Input.GotFocus += (_, _) => { _focused = true; Invalidate(); };
         Input.LostFocus += (_, _) => { _focused = false; Invalidate(); };
+        Input.MouseEnter += (_, _) => Cursor = Cursors.IBeam;
         Click += (_, _) => Input.Focus();
     }
 
@@ -400,7 +528,7 @@ sealed class OmniBox : Panel
 
     void Place()
     {
-        var left = Theme.S(_leading.Length > 0 ? 32 : 14);
+        var left = Theme.S(_leading.Length > 0 ? 34 : 16);
         // vertical centring has to be manual: a borderless TextBox is exactly one line tall
         Input.SetBounds(left, (Height - Input.PreferredHeight) / 2 + 1,
                         Math.Max(10, Width - left - Theme.S(14)), Input.PreferredHeight);
@@ -414,12 +542,32 @@ sealed class OmniBox : Panel
         // alone, so its rect is a hole the Mica backdrop shows through no matter what we put behind it.
         // Filling the rest of the pill made that hole a differently-tinted smear; letting the whole field
         // be glass makes it one surface with the toolbar, and the hairline still says "type here".
-        if (Config.Current.LiquidGlassEnabled)
-            Draw.Glass(g, field, Theme.Fill1, Theme.R);
-        Draw.Stroke(g, field, _focused ? Theme.Accent : Theme.Line, Theme.R, _focused ? Theme.Sf(1.6f) : 1f);
+        // With no backdrop (BAKA, Custom, or glass off) nothing shows through the TextBox, so the field can
+        // be a solid pill and the TextBox simply takes the same colour.
+        var radius = Theme.GlassOn ? Theme.R : (Height - 1) / 2f;
+        var solid = !Theme.GlassOn;
+        var fill = _focused ? Theme.Fill2 : Theme.Fill1;
+        if (solid)
+        {
+            if (Input.BackColor != fill) Input.BackColor = fill;
+            using (var bg = new SolidBrush(Theme.ChromeBg)) g.FillRectangle(bg, ClientRectangle);
+            Draw.Fill(g, field, fill, radius);
+        }
+        else if (Theme.GlassStyle)
+            Draw.Glass(g, field, Theme.Fill1, radius);
+        Draw.Stroke(g, field, _focused ? Theme.Accent : Theme.Line, radius, _focused ? Theme.Sf(1.4f) : 1f);
         if (_leading.Length > 0)
             Draw.Glyph(g, _leading, _mark, _leading == Theme.Insecure ? Theme.Bad : Theme.Muted,
-                       new RectangleF(Theme.Sf(9), 0, Theme.Sf(18), Height));
+                       new RectangleF(Theme.Sf(10), 0, Theme.Sf(18), Height));
+    }
+
+    /// Re-reads the theme after a settings change.
+    public void ApplyTheme()
+    {
+        BackColor = Theme.ChromeBg;
+        Input.BackColor = Theme.GlassOn ? Theme.ChromeBg : (_focused ? Theme.Fill2 : Theme.Fill1);
+        Input.ForeColor = Theme.Text;
+        Invalidate();
     }
 
     protected override void Dispose(bool disposing)
@@ -481,7 +629,7 @@ sealed class TabStrip : Control
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
                  ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
         BackColor = Theme.Strip;   // opaque, see OnPaint
-        Height = Theme.S(42);
+        Height = Theme.S(38);
     }
 
     public void Select(int index)
@@ -506,13 +654,15 @@ sealed class TabStrip : Control
 
     public void RefreshLayout()
     {
-        _scrollOffset = Math.Clamp(_scrollOffset, 0, Math.Max(0, Tabs.Count * Theme.S(44) - Height + Theme.S(44)));
+        _scrollOffset = Math.Clamp(_scrollOffset, 0, Math.Max(0, Tabs.Count * Theme.RailRow - Height + Theme.RailRow));
         Invalidate();
     }
 
+    static readonly int RailTop = Theme.S(40);
+
     Rectangle TabRect(int i) => Vertical
-        ? new Rectangle(Theme.S(4), Theme.S(40) + i * Theme.S(44) - _scrollOffset,
-            Math.Max(Theme.S(34), Width - Theme.S(8)), Theme.S(40))
+        ? new Rectangle(Theme.S(6), RailTop + i * Theme.RailRow - _scrollOffset,
+            Math.Max(Theme.S(34), Width - Theme.S(12)), Theme.RailRowHeight)
         : new Rectangle(Edge + i * (TabWidth + Gap), Inset, TabWidth, Height - Inset * 2);
 
     Rectangle CloseRect(int i)
@@ -528,7 +678,7 @@ sealed class TabStrip : Control
     /// minimises the window.
     public Rectangle PlusRect()
     {
-        if (Vertical) return new Rectangle(Theme.S(4), Theme.S(3), Math.Max(Theme.S(34), Width - Theme.S(8)), Theme.S(32));
+        if (Vertical) return new Rectangle(Theme.S(6), Theme.S(4), Math.Max(Theme.S(34), Width - Theme.S(12)), Theme.RailRowHeight);
         var x = Math.Min(Edge + Tabs.Count * (TabWidth + Gap) + Theme.S(2),
                          Width - CapW * 3 - PlusWidth - Theme.S(4));
         return new Rectangle(Math.Max(Edge, x), Inset, PlusWidth, Height - Inset * 2);
@@ -598,8 +748,8 @@ sealed class TabStrip : Control
     {
         if (Vertical)
         {
-            var row = Theme.S(44);
-            var max = Math.Max(0, Tabs.Count * row - Math.Max(0, Height - Theme.S(40)));
+            var row = Theme.RailRow;
+            var max = Math.Max(0, Tabs.Count * row - Math.Max(0, Height - RailTop));
             _scrollOffset = Math.Clamp(_scrollOffset - Math.Sign(e.Delta) * row * 3, 0, max);
             Invalidate();
         }
@@ -648,8 +798,18 @@ sealed class TabStrip : Control
 
         if (Vertical)
         {
-            if (_hotPlus) Draw.Fill(g, PlusRect(), Theme.Fill2, Theme.R - 1);
-            Draw.Glyph(g, Theme.Add, _plusFont, Theme.Text, PlusRect());
+            var plusRect = PlusRect();
+            if (_hotPlus) Draw.Fill(g, plusRect, Theme.Fill2, Theme.R - 1);
+            if (Compact) Draw.Glyph(g, Theme.Add, _plusFont, Theme.Text, plusRect);
+            else
+            {
+                var plusMark = new Rectangle(plusRect.X + Theme.S(8), plusRect.Y, IconBox + Theme.S(4), plusRect.Height);
+                Draw.Glyph(g, Theme.Add, _iconFont, Theme.Text, plusMark);
+                Draw.Label(g, "New tab", Theme.Ui, _hotPlus ? Theme.Text : Theme.Muted,
+                    new RectangleF(plusMark.Right + Theme.S(6), plusRect.Y, plusRect.Width - plusMark.Width - Theme.S(16), plusRect.Height));
+            }
+            using (var sep = new Pen(Theme.Line))
+                g.DrawLine(sep, Theme.S(10), RailTop - Theme.S(3), Width - Theme.S(10), RailTop - Theme.S(3));
             for (var i = 0; i < Tabs.Count; i++)
             {
                 var r = TabRect(i);
@@ -657,7 +817,7 @@ sealed class TabStrip : Control
                 var active = i == SelectedIndex;
                 if (active || i == _hotTab)
                 {
-                    if (Config.Current.LiquidGlassEnabled) Draw.Glass(g, r, active ? Theme.Fill2 : Theme.Fill1, Theme.R - 1);
+                    if (Theme.GlassStyle) Draw.Glass(g, r, active ? Theme.Fill2 : Theme.Fill1, Theme.R - 1);
                     else Draw.Fill(g, r, active ? Theme.Fill2 : Theme.Fill1, Theme.R - 1);
                 }
                 if (active)
@@ -695,7 +855,7 @@ sealed class TabStrip : Control
             // information the title already carries.
             if (active || i == _hotTab)
             {
-                if (Config.Current.LiquidGlassEnabled) Draw.Glass(g, r, active ? Theme.Fill2 : Theme.Fill1, Theme.R - 1);
+                if (Theme.GlassStyle) Draw.Glass(g, r, active ? Theme.Fill2 : Theme.Fill1, Theme.R - 1);
                 else Draw.Fill(g, r, active ? Theme.Fill2 : Theme.Fill1, Theme.R - 1);
             }
             if (active)
@@ -746,13 +906,14 @@ sealed class TabStrip : Control
     }
 }
 
-/// The bookmarks bar: labels as rounded pills on the glass. Owner-drawn because a row of WinForms
-/// Buttons would be opaque square boxes sitting on the backdrop.
+/// The bookmarks bar: rows (left rail) or pills (top bar), each with the site's icon. Owner-drawn
+/// because a row of WinForms Buttons would be opaque square boxes with no room for an icon.
 sealed class PillBar : Control
 {
-    readonly List<(string Text, Rectangle R)> _items = [];
+    readonly List<(string Text, Image? Icon, Rectangle R)> _items = [];
     readonly ToolTip _tips = new() { InitialDelay = 350, ReshowDelay = 100 };
-    string[] _labels = [];
+    readonly Font _glyphFont = new(Theme.IconFamily, 8f);
+    (string Text, Image? Icon)[] _entries = [];
     bool _vertical, _compact;
     int _scrollOffset;
     int _hot = -1;
@@ -768,14 +929,19 @@ sealed class PillBar : Control
         Height = Theme.S(30);
     }
 
-    public void Set(IEnumerable<string> labels, bool vertical = false, bool compact = false)
+    public void Set(IEnumerable<string> labels, bool vertical = false, bool compact = false) =>
+        Set(labels.Select(l => (l, (Image?)null)), vertical, compact);
+
+    public void Set(IEnumerable<(string Text, Image? Icon)> entries, bool vertical = false, bool compact = false)
     {
-        _labels = [.. labels];
+        _entries = [.. entries];
         _vertical = vertical;
         _compact = compact;
         _scrollOffset = 0;
         LayoutItems();
     }
+
+    static readonly int IconBox = Theme.S(16);
 
     void LayoutItems()
     {
@@ -785,21 +951,21 @@ sealed class PillBar : Control
         using var g = _vertical ? null : CreateGraphics();
         if (_vertical)
         {
-            var row = Theme.S(34);
-            var x = Theme.S(4);
-            var w = Math.Max(Theme.S(30), Width - Theme.S(8));
-            for (var i = 0; i < _labels.Length; i++)
-                _items.Add((_labels[i], new Rectangle(x, Theme.S(2) + i * row - _scrollOffset,
-                    w, row - Theme.S(4))));
+            var row = Theme.RailRow;
+            var x = Theme.S(6);
+            var w = Math.Max(Theme.S(30), Width - Theme.S(12));
+            for (var i = 0; i < _entries.Length; i++)
+                _items.Add((_entries[i].Text, _entries[i].Icon,
+                    new Rectangle(x, Theme.S(2) + i * row - _scrollOffset, w, Theme.RailRowHeight)));
         }
         else
         {
             var x = Theme.S(8);
-            foreach (var text in _labels)
+            foreach (var (text, icon) in _entries)
             {
-                var w = Math.Min(Theme.S(190), (int)Math.Ceiling(g!.MeasureString(text, Theme.Ui).Width) + Theme.S(18));
-                _items.Add((text, new Rectangle(x, Theme.S(3), w, Height - Theme.S(7))));
-                x += w + Theme.S(3);
+                var w = Math.Min(Theme.S(200), (int)Math.Ceiling(g!.MeasureString(text, Theme.Ui).Width) + Theme.S(18) + IconBox + Theme.S(6));
+                _items.Add((text, icon, new Rectangle(x, Theme.S(4), w, Height - Theme.S(8))));
+                x += w + Theme.S(4);
             }
         }
         Invalidate();
@@ -821,8 +987,8 @@ sealed class PillBar : Control
     {
         if (_vertical)
         {
-            var row = Theme.S(34);
-            var max = Math.Max(0, _labels.Length * row - Height);
+            var row = Theme.RailRow;
+            var max = Math.Max(0, _entries.Length * row - Height);
             _scrollOffset = Math.Clamp(_scrollOffset - Math.Sign(e.Delta) * row * 3, 0, max);
             LayoutItems();
         }
@@ -851,23 +1017,214 @@ sealed class PillBar : Control
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
+        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+        if (_items.Count == 0 && _vertical && !_compact)
+        {
+            Draw.Label(g, "Ctrl+D adds a bookmark", Theme.Ui, Theme.Muted,
+                new RectangleF(Theme.S(12), Theme.S(6), Width - Theme.S(20), Theme.S(24)));
+            return;
+        }
         for (var i = 0; i < _items.Count; i++)
         {
-            var (text, r) = _items[i];
+            var (text, icon, r) = _items[i];
             if (!r.IntersectsWith(ClientRectangle)) continue;
-            if (Config.Current.LiquidGlassEnabled) Draw.Glass(g, r, i == _hot ? Theme.Fill2 : Theme.Fill1, Theme.Sf(7));
-            else Draw.Fill(g, r, i == _hot ? Theme.Fill2 : Theme.Fill1, Theme.Sf(7));
-            var shown = _compact ? (text.Length == 0 ? "•" : text[..1].ToUpperInvariant()) : text;
-            var labelRect = _vertical && !_compact
-                ? Rectangle.Inflate(r, -Theme.S(8), -Theme.S(1)) : r;
-            Draw.Label(g, shown, Theme.Ui, i == _hot ? Theme.Text : Theme.Muted, labelRect,
-                centre: !_vertical || _compact);
+            // Rows on the rail stay unfilled until hovered, like the tab list; the top bar keeps its pills.
+            if (i == _hot || !_vertical)
+            {
+                if (Theme.GlassStyle) Draw.Glass(g, r, i == _hot ? Theme.Fill2 : Theme.Fill1, Theme.Sf(7));
+                else Draw.Fill(g, r, i == _hot ? Theme.Fill2 : Theme.Fill1, Theme.Sf(7));
+            }
+            var mark = _compact
+                ? new Rectangle(r.X + (r.Width - IconBox) / 2, r.Y + (r.Height - IconBox) / 2, IconBox, IconBox)
+                : new Rectangle(r.X + Theme.S(10), r.Y + (r.Height - IconBox) / 2, IconBox, IconBox);
+            if (icon is not null) g.DrawImage(icon, mark);
+            else Draw.Glyph(g, Theme.Globe, _glyphFont, Theme.Muted, mark);
+            if (_compact) continue;
+            var textRect = new RectangleF(mark.Right + Theme.S(8), r.Y, Math.Max(4, r.Right - mark.Right - Theme.S(14)), r.Height);
+            Draw.Label(g, text, Theme.Ui, i == _hot ? Theme.Text : Theme.Muted, textRect);
         }
     }
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) _tips.Dispose();
+        if (disposing) { _tips.Dispose(); _glyphFont.Dispose(); }
         base.Dispose(disposing);
+    }
+}
+
+/// Rounded text button with an optional leading glyph. Replaces the stock flat Button in settings and
+/// dialogs so every button has the same pill shape, hover, and keyboard focus ring.
+sealed class PillButton : Control
+{
+    readonly Font _glyphFont = new(Theme.IconFamily, 9f);
+    bool _hot, _down;
+    public string Glyph { get; set; }
+    /// Accent buttons are the one primary action in a group (Add to Baka, Install).
+    public bool Accent { get; set; }
+
+    public PillButton(string text, string glyph = "", bool accent = false)
+    {
+        Text = text;
+        Glyph = glyph;
+        Accent = accent;
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer |
+                 ControlStyles.ResizeRedraw | ControlStyles.SupportsTransparentBackColor, true);
+        Cursor = Cursors.Hand;
+        Font = Theme.Ui;
+        AccessibleName = text;
+        AccessibleRole = AccessibleRole.PushButton;
+        Height = Theme.S(30);
+        Width = PreferredWidth;
+        TabStop = true;
+    }
+
+    // Measured with GDI+ like the label is drawn (it runs wider than TextRenderer), plus the padding.
+    public int PreferredWidth
+    {
+        get
+        {
+            using var g = Graphics.FromHwnd(IntPtr.Zero);
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+            return (int)Math.Ceiling(g.MeasureString(Text, Theme.Ui).Width) + Theme.S(Glyph.Length > 0 ? 50 : 30);
+        }
+    }
+
+    public void PerformClick() { if (Enabled) OnClick(EventArgs.Empty); }
+    protected override void OnTextChanged(EventArgs e) { AccessibleName = Text; Invalidate(); base.OnTextChanged(e); }
+    protected override void OnMouseEnter(EventArgs e) { _hot = true; Invalidate(); base.OnMouseEnter(e); }
+    protected override void OnMouseLeave(EventArgs e) { _hot = _down = false; Invalidate(); base.OnMouseLeave(e); }
+    protected override void OnMouseDown(MouseEventArgs e) { _down = true; Invalidate(); base.OnMouseDown(e); }
+    protected override void OnMouseUp(MouseEventArgs e) { _down = false; Invalidate(); base.OnMouseUp(e); }
+    protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
+    protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
+    protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
+    protected override bool IsInputKey(Keys k) => k is Keys.Space or Keys.Enter || base.IsInputKey(k);
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        if (e.KeyCode is Keys.Space or Keys.Enter) { PerformClick(); e.Handled = true; }
+        base.OnKeyDown(e);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        using (var bg = new SolidBrush(Parent?.BackColor ?? Theme.Content)) g.FillRectangle(bg, ClientRectangle);
+        var r = new RectangleF(0.5f, 0.5f, Width - 1, Height - 1);
+        var radius = (Height - 1) / 2f;
+        Color fill, text;
+        if (Accent) { fill = _down ? Theme.Fill3 : Theme.Accent; text = _down ? Theme.Text : (Theme.Contrast(Theme.Accent, Color.Black) > 7 ? Color.Black : Color.White); }
+        else { fill = _down ? Theme.Fill3 : _hot ? Theme.Fill3 : Theme.Fill2; text = Theme.Text; }
+        if (!Enabled) { fill = Theme.Fill1; text = Theme.Muted; }
+        Draw.Fill(g, r, fill, radius);
+        if (!Accent) Draw.Stroke(g, r, Theme.Line, radius);
+        if (Focused && ShowFocusCues) Draw.Stroke(g, RectangleF.Inflate(r, -1.5f, -1.5f), Theme.Accent, radius, Theme.Sf(1.5f));
+        var x = Theme.S(14);
+        if (Glyph.Length > 0)
+        {
+            Draw.Glyph(g, Glyph, _glyphFont, text, new RectangleF(x - Theme.S(2), 0, Theme.S(18), Height));
+            x += Theme.S(20);
+        }
+        Draw.Label(g, Text, Theme.Ui, text, new RectangleF(x, 0, Width - x - Theme.S(10), Height));
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) _glyphFont.Dispose();
+        base.Dispose(disposing);
+    }
+}
+
+/// On/off switch with its label on the left, the way Windows 11 and macOS settings show booleans.
+/// A CheckBox underneath would draw a tick box; this is owner-drawn and keyboard-operable (Space).
+sealed class ToggleSwitch : Control
+{
+    bool _checked, _hot;
+    public string Description { get; set; } = "";
+    public event EventHandler? CheckedChanged;
+
+    public bool Checked
+    {
+        get => _checked;
+        set { if (_checked == value) return; _checked = value; Invalidate(); CheckedChanged?.Invoke(this, EventArgs.Empty); AccessibilityNotifyClients(AccessibleEvents.StateChange, -1); }
+    }
+
+    public ToggleSwitch(string text, bool value)
+    {
+        Text = text;
+        _checked = value;
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer |
+                 ControlStyles.ResizeRedraw, true);
+        Cursor = Cursors.Hand;
+        Font = Theme.Ui;
+        AccessibleName = text;
+        AccessibleRole = AccessibleRole.CheckButton;
+        TabStop = true;
+        Height = Theme.S(34);
+    }
+
+    protected override AccessibleObject CreateAccessibilityInstance() => new SwitchAccessible(this);
+
+    sealed class SwitchAccessible(ToggleSwitch owner) : ControlAccessibleObject(owner)
+    {
+        public override AccessibleStates State => base.State | (owner.Checked ? AccessibleStates.Checked : 0);
+        public override string DefaultAction => owner.Checked ? "Turn off" : "Turn on";
+        public override void DoDefaultAction() => owner.Checked = !owner.Checked;
+    }
+
+    protected override void OnClick(EventArgs e) { Checked = !Checked; Focus(); base.OnClick(e); }
+    protected override void OnMouseEnter(EventArgs e) { _hot = true; Invalidate(); base.OnMouseEnter(e); }
+    protected override void OnMouseLeave(EventArgs e) { _hot = false; Invalidate(); base.OnMouseLeave(e); }
+    protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
+    protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
+    protected override bool IsInputKey(Keys k) => k == Keys.Space || base.IsInputKey(k);
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        if (e.KeyCode == Keys.Space) { Checked = !Checked; e.Handled = true; }
+        base.OnKeyDown(e);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        using (var bg = new SolidBrush(Parent?.BackColor ?? Theme.Content)) g.FillRectangle(bg, ClientRectangle);
+        int w = Theme.S(40), h = Theme.S(20);
+        var track = new RectangleF(Width - w - 1, (Height - h) / 2f, w, h);
+        var on = _checked;
+        Draw.Fill(g, track, on ? Theme.Accent : (_hot ? Theme.Fill3 : Theme.Fill2), h / 2f);
+        if (!on) Draw.Stroke(g, track, Theme.Muted, h / 2f);
+        var knob = Theme.Sf(14);
+        var kx = on ? track.Right - knob - Theme.Sf(3) : track.X + Theme.Sf(3);
+        var knobColor = on ? (Theme.Contrast(Theme.Accent, Color.Black) > 7 ? Color.Black : Color.White) : Theme.Text;
+        Draw.Fill(g, new RectangleF(kx, track.Y + (h - knob) / 2f, knob, knob), knobColor, knob / 2f);
+        if (Focused && ShowFocusCues) Draw.Stroke(g, RectangleF.Inflate(track, Theme.Sf(2.5f), Theme.Sf(2.5f)), Theme.Accent, h / 2f + 2, Theme.Sf(1.4f));
+        var textWidth = Width - w - Theme.S(16);
+        if (Text.Length == 0 || textWidth <= 0) return;
+        if (Description.Length > 0)
+        {
+            Draw.Label(g, Text, Theme.Ui, Theme.Text, new RectangleF(0, Theme.S(2), textWidth, Height / 2f));
+            Draw.Label(g, Description, Theme.Ui, Theme.Muted, new RectangleF(0, Height / 2f - Theme.S(1), textWidth, Height / 2f));
+        }
+        else Draw.Label(g, Text, Theme.Ui, Theme.Text, new RectangleF(0, 0, textWidth, Height));
+    }
+}
+
+/// A rounded settings card: Fill1 sheet with a hairline border. Rows inside paint on Fill1.
+sealed class CardPanel : Panel
+{
+    public CardPanel()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer |
+                 ControlStyles.ResizeRedraw, true);
+        BackColor = Theme.Fill1;
+        Padding = new Padding(Theme.S(16), Theme.S(10), Theme.S(16), Theme.S(10));
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        using (var bg = new SolidBrush(Parent?.BackColor ?? Theme.Content)) g.FillRectangle(bg, ClientRectangle);
+        var r = new RectangleF(0.5f, 0.5f, Width - 1, Height - 1);
+        Draw.Fill(g, r, Theme.Fill1, Theme.Sf(10));
+        Draw.Stroke(g, r, Theme.Line, Theme.Sf(10));
     }
 }

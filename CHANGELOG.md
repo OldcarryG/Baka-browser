@@ -2,7 +2,25 @@
 
 Notable changes to Baka Browser are recorded here. Versions are published as GitHub Releases by pushing a matching `vMAJOR.MINOR.PATCH` tag.
 
-## [1.3.0] - 2026-10-28
+## [1.4.0] - 2026-10-28
+
+### Added
+
+- Chrome Web Store install: an **Add to Baka** button on store extension pages. The `.crx` package is downloaded from Google's update service over HTTPS, its CRX3 signature is verified against the extension ID, it is unpacked with size and path checks, the store key is kept so the extension keeps its store ID, and the requested permissions are shown before install.
+- Extensions toolbar button and menu: popups, options pages, on/off, remove, Chrome Web Store link, unpacked install.
+- Main menu (Alt+F) with icons; page zoom, print, home button; `--ui-test` scripted UI run with screenshots.
+- Settings > Extensions (installed list with switches) and Settings > About (version, WebView2 version, update check).
+- Site icons for bookmarks and new-tab quick links, cached locally from pages already visited.
+- Self-checks for store URLs, CRX parsing, signature and ID checks, tampered packages and zip-slip.
+
+### Changed
+
+- BAKA theme is flat and opaque (no Mica) to match BAKA Windows; compact toolbar (40 px), tab rail and bookmarks rail.
+- Settings redesigned: section rail with icons, cards, switches, pill buttons, themed dialogs instead of Windows message boxes.
+- Settings from versions before 1.3 that still use the old default (Dark with the blue accent) move to BAKA once.
+- Version 1.3.0 was never published; its changes ship in this release.
+
+## [1.3.0] - 2026-10-28 (not published)
 
 ### Added
 

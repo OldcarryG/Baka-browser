@@ -10,6 +10,23 @@ static class AutoUpdater
     const string Repository = "https://github.com/OldcarryG/Baka-browser";
     static int _checking;
 
+    /// The "Check for updates" button in Settings > About: same download path, but it reports what happened.
+    public static async Task<string> CheckNowAsync()
+    {
+        try
+        {
+            var manager = new UpdateManager(new GithubSource(Repository, null, false));
+            if (!manager.IsInstalled) return "This copy was not installed with the Baka Browser installer, so it cannot update itself.";
+            if (manager.UpdatePendingRestart is { } pending)
+                return $"Version {pending.Version} is downloaded and installs the next time Baka Browser starts.";
+            var update = await manager.CheckForUpdatesAsync();
+            if (update is null) return $"Baka Browser {manager.CurrentVersion} is up to date.";
+            await manager.DownloadUpdatesAsync(update);
+            return $"Version {update.TargetFullRelease.Version} was downloaded and installs the next time Baka Browser starts.";
+        }
+        catch (Exception ex) { return $"Could not check for updates: {ex.Message}"; }
+    }
+
     public static async Task CheckAndDownloadAsync()
     {
         if (Interlocked.Exchange(ref _checking, 1) != 0) return;

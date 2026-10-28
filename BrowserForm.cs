@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -14,7 +14,7 @@ static class Url
     static readonly string[] PassThrough =
     [
         "http://", "https://", "mailto:", "tel:", "about:",
-        "file:", "edge://", "chrome://", "view-source:",
+        "file:", "edge://", "chrome://", "view-source:", "chrome-extension://",
     ];
 
     public static string From(string input, string searchTemplate)
@@ -49,24 +49,30 @@ sealed class Tab
     public bool HomeAssetsMapped;
 }
 
-sealed class BrowserForm : Form
+sealed partial class BrowserForm : Form, IExtensionHost
 {
     readonly Panel _content = new() { Dock = DockStyle.Fill, BackColor = Theme.Content };
     readonly Panel _bookmarkPanel = new() { Dock = DockStyle.Left, BackColor = Theme.ChromeBg };
     readonly PillBar _marks = new() { Dock = DockStyle.Fill };
-    readonly IconButton _marksToggle = new("‹", "Collapse bookmarks sidebar");
-    readonly Panel _bar = new() { Dock = DockStyle.Top, Height = Theme.S(44), BackColor = Theme.ChromeBg };
+    readonly IconButton _marksToggle = new(Theme.ChevronLeft, "Collapse bookmarks sidebar", 8f);
+    readonly Panel _bar = new() { Dock = DockStyle.Top, Height = Theme.BarHeight, BackColor = Theme.ChromeBg };
     readonly Panel _tabsPanel = new() { Dock = DockStyle.Left, BackColor = Theme.Strip };
     readonly TabStrip _tabs = new() { Dock = DockStyle.Fill };
-    readonly IconButton _tabsToggle = new("‹", "Collapse tabs sidebar");
+    readonly IconButton _tabsToggle = new(Theme.ChevronLeft, "Collapse tabs sidebar", 8f);
     readonly IconButton _back = new(Theme.Back, "Back  (Alt+Left)");
     readonly IconButton _fwd = new(Theme.Fwd, "Forward  (Alt+Right)");
     readonly IconButton _reload = new(Theme.Reload, "Reload  (F5)");
+    readonly IconButton _home = new(Theme.Home, "New tab page");
     readonly IconButton _star = new(Theme.Star, "Bookmark this page  (Ctrl+D)");
-    readonly IconButton _shield = new(Theme.Shield, "Built-in privacy settings", 11f);
-    readonly IconButton _viewMode = new(Theme.Fullscreen, "Display mode  (F11)");
-    readonly IconButton _gear = new(Theme.Settings, "Settings  (Ctrl+,)");
-    readonly IconButton _privateButton = new(Theme.Private, "New private window  (Ctrl+Shift+N)");
+    readonly IconButton _shield = new(Theme.ShieldIcon, "Built-in privacy settings");
+    readonly IconButton _extensionsButton = new(Theme.Puzzle, "Extensions");
+    readonly IconButton _menuButton = new(Theme.More, "Menu  (Alt+F)");
+    /// Shown only on a Chrome Web Store extension page: installs that extension into this browser.
+    readonly PillButton _storeButton = new("Add to Baka", Theme.Add, accent: true) { Visible = false };
+    readonly ContextMenuStrip _mainMenu = new();
+    readonly ContextMenuStrip _extensionsMenu = new();
+    string? _storeId;
+    bool _storeInstalling;
     readonly Label _privateBadge = new()
     {
         Text = "PRIVATE", AutoSize = false, TextAlign = ContentAlignment.MiddleCenter,
@@ -115,9 +121,9 @@ sealed class BrowserForm : Form
         Icon = App.Icon;
 
         _privateBadge.Visible = privateBrowsing;
-        _privateButton.Visible = !privateBrowsing;
         _star.Enabled = !privateBrowsing;
-        _bar.Controls.AddRange([_back, _fwd, _reload, _omni, _star, _shield, _viewMode, _gear, _privateButton, _privateBadge]);
+        _extensionsButton.Visible = false;   // shown once StartAsync knows the engine supports extensions
+        _bar.Controls.AddRange([_back, _fwd, _reload, _home, _omni, _storeButton, _extensionsButton, _star, _shield, _menuButton, _privateBadge]);
         _bar.Resize += (_, _) => LayoutBar();
         // hairline under the toolbar, Safari's one concession to a border
         _bar.Paint += (_, e) =>
@@ -171,13 +177,14 @@ sealed class BrowserForm : Form
             if (Current?.View.CoreWebView2 is not { } core) return;
             if (_reload.Glyph == Theme.Stop) core.Stop(); else core.Reload();
         };
-        _gear.Click += (_, _) => OpenSettings();
-        _shield.Click += (_, _) => OpenSettings();
+        _home.Click += (_, _) => GoHome();
+        _shield.Click += (_, _) => OpenSettings("Privacy");
         _star.Click += (_, _) => ToggleBookmark();
-        _privateButton.Click += (_, _) => OpenPrivateWindow();
-        _viewMode.Click += (_, _) => ShowDisplayMenu();
-        _displayMenu.Items.Add("True fullscreen (hide browser controls)", null, (_, _) => EnterTrueFullscreen());
-        _displayMenu.Items.Add("Keep tabs and toolbar visible (maximize)", null, (_, _) => KeepBrowserControlsVisible());
+        _menuButton.Click += (_, _) => ShowMainMenu();
+        _extensionsButton.Click += (_, _) => _ = ShowExtensionsMenuAsync();
+        _storeButton.Click += (_, _) => _ = InstallFromStoreAsync();
+        BuildMainMenu();
+        Theme.Style(_extensionsMenu);
 
         _omni.Input.KeyDown += (_, e) =>
         {
@@ -227,12 +234,14 @@ sealed class BrowserForm : Form
     protected override async void OnShown(EventArgs e)
     {
         base.OnShown(e);
-        Theme.Glass(this, backdrop: Config.Current.LiquidGlassEnabled && !Theme.CustomMode, updateGlobalBackdrop: true);
+        Theme.Glass(this, backdrop: Theme.GlassStyle, updateGlobalBackdrop: true);
         // the backdrop only shows where the chrome paints black, so the panels have to agree with it
         // (_tabs is deliberately absent: it paints itself opaque, over DWM's leftover caption strip).
         // It has to happen here, not in a field initialiser: Glass() above is what decides ChromeBg.
-        foreach (Control c in new Control[] { this, _bar, _bookmarkPanel, _marks, _tabsPanel, _tabsToggle, _omni, _omni.Input })
+        foreach (Control c in new Control[] { this, _bar, _bookmarkPanel, _marks, _omni })
             c.BackColor = Theme.ChromeBg;
+        _tabsToggle.BackColor = Theme.Strip;
+        _omni.ApplyTheme();
         Invalidate(true);
         LayoutBar();
         LayoutTabs();
@@ -251,17 +260,24 @@ sealed class BrowserForm : Form
 
     void LayoutBar()
     {
-        int pad = Theme.S(8), btn = Theme.S(32), gap = Theme.S(2);
+        int pad = Theme.S(6), btn = Theme.ButtonSize, gap = Theme.S(2);
         var y = (_bar.Height - btn) / 2;
         var x = pad;
-        foreach (var b in new[] { _back, _fwd, _reload }) { b.SetBounds(x, y, btn, btn); x += btn + gap; }
+        foreach (var b in new[] { _back, _fwd, _reload, _home }) { b.SetBounds(x, y, btn, btn); x += btn + gap; }
 
         var right = _bar.Width - pad;
-        foreach (var b in new[] { _gear, _viewMode, _shield, _star, _privateButton }.Where(b => b.Visible))
+        foreach (var b in new Control[] { _menuButton, _shield, _star, _extensionsButton }.Where(b => b.Visible))
         {
             right -= btn;
             b.SetBounds(right, y, btn, btn);
             right -= gap;
+        }
+        if (_storeButton.Visible)
+        {
+            var storeWidth = _storeButton.PreferredWidth;
+            right -= storeWidth + Theme.S(4);
+            _storeButton.SetBounds(right, y + 1, storeWidth, btn - 2);
+            right -= Theme.S(4);
         }
         if (_privateBadge.Visible)
         {
@@ -281,8 +297,8 @@ sealed class BrowserForm : Form
         var collapsed = !top && Config.Current.BookmarksCollapsed;
         _bookmarkPanel.SuspendLayout();
         _bookmarkPanel.Dock = top ? DockStyle.Top : DockStyle.Left;
-        _bookmarkPanel.Height = top ? Theme.S(36) : 0;
-        _bookmarkPanel.Width = top ? 0 : Theme.S(collapsed ? 44 : 224);
+        _bookmarkPanel.Height = top ? Theme.S(34) : 0;
+        _bookmarkPanel.Width = top ? 0 : Theme.S(collapsed ? 44 : 196);
         _bookmarkPanel.Visible = Config.Current.ShowBookmarksBar;
         _bookmarkPanel.BackColor = Theme.ChromeBg;
         _tabsPanel.BackColor = Theme.Strip;
@@ -290,9 +306,11 @@ sealed class BrowserForm : Form
         _marks.Dock = DockStyle.Fill;
         _marksToggle.Dock = top ? DockStyle.Right : DockStyle.Top;
         _marksToggle.Visible = !top;
-        _marksToggle.Glyph = collapsed ? "›" : "‹";
+        _marksToggle.Glyph = collapsed ? Theme.ChevronRight : Theme.ChevronLeft;
+        _marksToggle.Height = Theme.RailRowHeight;
+        _marksToggle.BackColor = Theme.ChromeBg;
         _marksToggle.AccessibleName = collapsed ? "Expand bookmarks sidebar" : "Collapse bookmarks sidebar";
-        _marks.Set(Bookmarks.All.Select(m => m.Title.Length > 26 ? m.Title[..25] + "…" : m.Title),
+        _marks.Set(Bookmarks.All.Select(m => (m.Title.Length > 26 ? m.Title[..25] + "…" : m.Title, SiteIcons.For(m.Url))),
             vertical: !top, compact: collapsed);
         _bookmarkPanel.ResumeLayout(performLayout: true);
     }
@@ -305,15 +323,16 @@ sealed class BrowserForm : Form
         _nativeCaptionLayout = left;
         _tabsPanel.SuspendLayout();
         _tabsPanel.Dock = left ? DockStyle.Left : DockStyle.Top;
-        _tabsPanel.Width = left ? Theme.S(collapsed ? 54 : 218) : 0;
-        _tabsPanel.Height = left ? 0 : Theme.S(42);
+        _tabsPanel.Width = left ? Theme.S(collapsed ? 50 : 204) : 0;
+        _tabsPanel.Height = left ? 0 : Theme.S(38);
         _tabsPanel.BackColor = Theme.Strip;
         _tabs.Vertical = left;
         _tabs.Compact = collapsed;
         _tabsToggle.Visible = left;
         _tabsToggle.Dock = DockStyle.Top;
-        _tabsToggle.Height = Theme.S(32);
-        _tabsToggle.Glyph = collapsed ? "›" : "‹";
+        _tabsToggle.Height = Theme.RailRowHeight;
+        _tabsToggle.BackColor = Theme.Strip;
+        _tabsToggle.Glyph = collapsed ? Theme.ChevronRight : Theme.ChevronLeft;
         _tabsToggle.AccessibleName = collapsed ? "Expand tabs sidebar" : "Collapse tabs sidebar";
         _tabs.BackColor = Theme.Strip;
         _tabsPanel.ResumeLayout(performLayout: true);
@@ -356,6 +375,10 @@ sealed class BrowserForm : Form
         RefreshPrivacyRuleCache();
         RefreshBookmarks();
         _extensionsAvailable = !_privateBrowsing && RuntimeSupportsExtensions();
+        _extensionsButton.Visible = _extensionsAvailable;
+        if (_extensionsAvailable) WebStore.CleanStaging();
+        BuildMainMenu();   // again, now that the Extensions entry can be included
+        LayoutBar();
         try
         {
             _env = await CoreWebView2Environment.CreateAsync(null, _privateProfilePath ?? App.Path_("profile"),
@@ -410,15 +433,18 @@ sealed class BrowserForm : Form
             if (_startUrls.Length > 0) _tabs.Select(1);
         }
         UpdateShield();
+        if (_extensionsAvailable)
+            try { await ListExtensionsAsync(); } catch { }   // fills the "already added" state of the store button
 
         _idleTimer.Start();
+        if (Args.Value("--ui-test") is { } testDir) _ = RunUiTestAsync(testDir);
         if (!_privateBrowsing && Config.Current.AutoUpdateEnabled) _updateTimer.Start();
     }
 
     void UpdateShield()
     {
         var on = Config.Current.BuiltInBlockingEnabled;
-        _shield.Glyph = on ? Theme.Shield : Theme.NoShield;
+        _shield.Glyph = on ? Theme.ShieldIcon : Theme.NoShield;
         _shield.AccessibleName = on ? "Built-in ad and tracker blocking is on" : "Built-in ad and tracker blocking is off";
         _shield.Invalidate();
     }
@@ -456,14 +482,30 @@ sealed class BrowserForm : Form
         _defaultCursors.Remove(parent);
     }
 
-    async void OpenSettings()
+    SettingsForm? _settings;
+
+    async void OpenSettings(string? page = null)
     {
-        using var dlg = new SettingsForm(_privateBrowsing, ClearSiteDataAsync,
-            _extensionsAvailable ? InstallExtensionAsync : null, _extensionsAvailable,
-            UpdateRecommendedBlocklistAsync, RemoveRecommendedBlocklist);
+        if (_settings is { IsDisposed: false })
+        {
+            if (page is not null) _settings.ShowPage(page);
+            _settings.Activate();
+            return;
+        }
+        using var dlg = new SettingsForm(_privateBrowsing, ClearSiteDataAsync, this,
+            UpdateRecommendedBlocklistAsync, RemoveRecommendedBlocklist, CheckForUpdatesNowAsync);
+        _settings = dlg;
+        if (page is not null) dlg.ShowPage(page);
         dlg.ShowDialog(this);
+        _settings = null;
         try { await ApplySettingsAsync(); }
         catch (Exception ex) { if (!_closing && !IsDisposed) MessageBox.Show(ex.Message, App.Name); }
+    }
+
+    async Task<string> CheckForUpdatesNowAsync()
+    {
+        if (_privateBrowsing) return "Updates are not checked from private windows.";
+        return await AutoUpdater.CheckNowAsync();
     }
 
     async Task<int> UpdateRecommendedBlocklistAsync()
@@ -492,17 +534,7 @@ sealed class BrowserForm : Form
         catch { return false; }
     }
 
-    async Task<string> InstallExtensionAsync(string extensionFolder)
-    {
-        if (_privateBrowsing) throw new InvalidOperationException("Extensions are not installed from private windows.");
-        if (Current?.View.CoreWebView2 is not { } core)
-            throw new InvalidOperationException("Open a browser tab before installing an extension.");
-        var fullPath = Path.GetFullPath(extensionFolder);
-        if (!File.Exists(Path.Combine(fullPath, "manifest.json")))
-            throw new InvalidDataException("Select the folder containing the extension's manifest.json file. Web Store pages and .crx files are not supported here.");
-        var extension = await core.Profile.AddBrowserExtensionAsync(fullPath);
-        return extension.Name;
-    }
+
 
     void SaveSession()
     {
@@ -576,16 +608,20 @@ sealed class BrowserForm : Form
 
     void ApplyTheme()
     {
-        Theme.Glass(this, backdrop: Config.Current.LiquidGlassEnabled && !Theme.CustomMode, updateGlobalBackdrop: true);
+        Theme.Glass(this, backdrop: Theme.GlassStyle, updateGlobalBackdrop: true);
         BackColor = Theme.ChromeBg;
         ForeColor = Theme.Text;
         _content.BackColor = Theme.Content;
         _bar.BackColor = Theme.ChromeBg;
         _bookmarkPanel.BackColor = Theme.ChromeBg;
         _tabsPanel.BackColor = Theme.Strip;
+        _tabsToggle.BackColor = Theme.Strip;
         _marks.BackColor = Theme.ChromeBg;
-        _omni.BackColor = Theme.ChromeBg;
-        _omni.Input.BackColor = Theme.ChromeBg;
+        _omni.ApplyTheme();
+        Theme.ResetGlyphCache();
+        BuildMainMenu();
+        Theme.Style(_extensionsMenu);
+        foreach (var t in _open) t.View.DefaultBackgroundColor = Theme.Content;
         Application.SetColorMode(Theme.DarkMode ? SystemColorMode.Dark : SystemColorMode.System);
         LayoutBookmarks();
         Invalidate(true);
@@ -710,7 +746,11 @@ sealed class BrowserForm : Form
         _tabs.Tabs.Add(tab.Strip);
         _tabs.RefreshLayout();
 
-        try { await view.EnsureCoreWebView2Async(_env); }
+        try
+        {
+            await view.EnsureCoreWebView2Async(_env);
+            view.ZoomFactor = Config.Current.ZoomFactor;
+        }
         catch (Exception ex)
         {
             if (_open.Remove(tab) && !IsDisposed) _tabs.Tabs.Remove(tab.Strip);
@@ -820,7 +860,7 @@ sealed class BrowserForm : Form
             if (tab == Current) SetWindowTitle(tab.Strip.Title);
         };
 
-        core.SourceChanged += (_, _) => { if (tab == Current) { ShowUrl(core.Source); UpdateStar(); } };
+        core.SourceChanged += (_, _) => { if (tab == Current) { ShowUrl(core.Source); UpdateStar(); UpdateStoreButton(); } };
         core.HistoryChanged += (_, _) => { if (tab == Current) SyncNavButtons(core); };
         core.FaviconChanged += async (_, _) => await LoadFaviconAsync(tab);
 
@@ -1002,6 +1042,14 @@ sealed class BrowserForm : Form
         tab.Strip.Icon?.Dispose();
         tab.Strip.Icon = next;
         _tabs.Invalidate();
+        // Remembered by host so the bookmarks rail can show the site's icon (regular windows only).
+        if (next is not null && !_privateBrowsing && tab.View.CoreWebView2?.Source is { } source)
+        {
+            SiteIcons.Save(source, next);
+            if (Bookmarks.All.Any(b => Uri.TryCreate(b.Url, UriKind.Absolute, out var bu) &&
+                    Uri.TryCreate(source, UriKind.Absolute, out var su) && bu.Host.Equals(su.Host, StringComparison.OrdinalIgnoreCase)))
+                LayoutBookmarks();
+        }
     }
 
     void ShowUrl(string url)
@@ -1048,7 +1096,8 @@ sealed class BrowserForm : Form
                 ShowUrl(core.Source);
                 SyncNavButtons(core);
                 UpdateStar();
-        SetWindowTitle(t.Strip.Title);
+                UpdateStoreButton();
+                SetWindowTitle(t.Strip.Title);
             }
         }
     }
@@ -1203,8 +1252,18 @@ sealed class BrowserForm : Form
         switch (keyData)
         {
             case Keys.F11:
-                if (_trueFullscreen) ExitTrueFullscreen(); else ShowDisplayMenu();
+                if (_trueFullscreen) ExitTrueFullscreen(); else EnterTrueFullscreen();
                 return true;
+            case Keys.Alt | Keys.F: ShowMainMenu(); return true;
+            case Keys.Control | Keys.P: PrintPage(); return true;
+            case Keys.Control | Keys.Oemplus:
+            case Keys.Control | Keys.Shift | Keys.Oemplus:
+            case Keys.Control | Keys.Add: SetZoom(Config.Current.ZoomFactor + 0.1); return true;
+            case Keys.Control | Keys.OemMinus:
+            case Keys.Control | Keys.Subtract: SetZoom(Config.Current.ZoomFactor - 0.1); return true;
+            case Keys.Control | Keys.D0:
+            case Keys.Control | Keys.NumPad0: SetZoom(1.0); return true;
+            case Keys.Control | Keys.Shift | Keys.E when _extensionsAvailable: _ = ShowExtensionsMenuAsync(); return true;
             case Keys.Escape when _trueFullscreen:
                 ExitTrueFullscreen();
                 return true;
@@ -1240,12 +1299,6 @@ sealed class BrowserForm : Form
                 return true;
         }
         return false;
-    }
-
-    void ShowDisplayMenu()
-    {
-        if (_closing || _viewMode.IsDisposed) return;
-        _displayMenu.Show(_viewMode, new Point(0, _viewMode.Height));
     }
 
     void EnterTrueFullscreen()
@@ -1297,7 +1350,10 @@ sealed class BrowserForm : Form
             _idleTimer.Dispose();
             _updateTimer.Dispose();
             _dashboardSaveTimer.Dispose();
-            _displayMenu.Dispose();
+            _mainMenu.Dispose();
+            _extensionsMenu.Dispose();
+            _popup?.Dispose();
+            foreach (var icon in _extensionIcons.Values) icon.Dispose();
         }
         base.Dispose(disposing);
         if (disposing)
@@ -1362,7 +1418,7 @@ sealed class BrowserForm : Form
         var logo = App.Logo;
         var background = App.HomeBackgroundUrl;
         var video = background.Length > 0 && App.HomeBackgroundIsVideo;
-        var liquidGlass = Config.Current.LiquidGlassEnabled;
+        var liquidGlass = Theme.GlassStyle;
         var backdrop = background.Length == 0 || video
             ? $"background:radial-gradient(ellipse at 50% 10%,{Css(Theme.Fill2)},{Css(Theme.Content)} 68%);"
             : $"background-image:linear-gradient(#0003,#0005),url('{background}');background-size:cover;background-position:center;";
@@ -1383,7 +1439,7 @@ sealed class BrowserForm : Form
         var links = new System.Text.StringBuilder();
         foreach (var mark in Bookmarks.All.Take(20))
             if (Uri.TryCreate(mark.Url, UriKind.Absolute, out var u) && u.Scheme is "http" or "https")
-                links.Append($"<a class=link href=\"{Esc(mark.Url)}\" title=\"{Esc(mark.Title)}\">{Esc(mark.Title.Length > 22 ? mark.Title[..21] + "…" : mark.Title)}</a>");
+                links.Append($"<a class=link href=\"{Esc(mark.Url)}\" title=\"{Esc(mark.Title)}\"><span class=fav>{FaviconTile(mark)}</span><span class=t>{Esc(mark.Title.Length > 22 ? mark.Title[..21] + "…" : mark.Title)}</span></a>");
         if (links.Length == 0) links.Append("<span class=empty>Bookmark a page to add a quick link.</span>");
         var enabledWidgets = Config.Current.DashboardWidgets;
         string WidgetVisibility(string id) => enabledWidgets.Contains(id, StringComparer.Ordinal) ? "" : "hidden";
@@ -1424,53 +1480,74 @@ sealed class BrowserForm : Form
             """;
         script = script.Replace("__SEARCH__", Json(Config.Current.SearchUrl), StringComparison.Ordinal)
             .Replace("__NONCE__", Json(nonce), StringComparison.Ordinal).Replace("__STATE__", state, StringComparison.Ordinal);
+        const string IconLink = "<svg viewBox='0 0 24 24' aria-hidden=true><path d='M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.5 1.5'/><path d='M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.5-1.5'/></svg>";
+        const string IconNote = "<svg viewBox='0 0 24 24' aria-hidden=true><path d='M5 4h10l4 4v12H5z'/><path d='M9 12h6M9 16h4'/></svg>";
+        const string IconTasks = "<svg viewBox='0 0 24 24' aria-hidden=true><path d='M9 11l3 3 8-8'/><path d='M20 12v7a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h11'/></svg>";
+        const string IconShield = "<svg viewBox='0 0 24 24' aria-hidden=true><path d='M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z'/></svg>";
+        const string IconSearch = "<svg viewBox='0 0 24 24' aria-hidden=true><circle cx='11' cy='11' r='7'/><path d='M20 20l-3.5-3.5'/></svg>";
+        const string IconSliders = "<svg viewBox='0 0 24 24' aria-hidden=true><path d='M4 6h9M19 6h1M4 12h3M13 12h7M4 18h11M21 18h-1'/><circle cx='16' cy='6' r='2.2'/><circle cx='10' cy='12' r='2.2'/><circle cx='18' cy='18' r='2.2'/></svg>";
         return $$"""
         <!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>New tab</title>
         <style>
         html{color-scheme:{{mode}}}*{box-sizing:border-box}
         body{position:relative;isolation:isolate;margin:0;min-height:100vh;{{backdrop}}background-color:{{Css(Theme.Content)}};color:{{Css(Theme.Text)}};
-             font:14px 'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;background-attachment:fixed}
+             font:13px 'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;background-attachment:fixed}
+        svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none}
         .wallpaper{position:fixed;inset:0;z-index:0;overflow:hidden;pointer-events:none}.wallpaper:after{content:"";position:absolute;inset:0;background:linear-gradient(#0005,#0008)}
         .wallpaper video{width:100%;height:100%;object-fit:cover}
-        .wrap{position:relative;z-index:1;width:min(1080px,94vw);margin:0 auto;padding:5vh 0 8vh}
-        header{display:flex;align-items:center;justify-content:space-between;margin-bottom:26px;color:{{Css(Theme.Muted)}}}
-        .brand{display:flex;align-items:center;gap:12px}.brand img{width:38px;height:38px;border-radius:11px}
-        .clock{text-align:right;font-size:14px;font-variant-numeric:tabular-nums}.clock b{display:block;font-size:24px;color:{{Css(Theme.Text)}};font-weight:600}
-        .private{color:#ffc9e8;border:1px solid #a44787;border-radius:99px;padding:5px 10px;font-size:11px;letter-spacing:.08em}
-        .search{margin:0 auto 24px;max-width:700px}.search input{width:100%;padding:16px 20px;border-radius:18px;
-        border:1px solid {{Css(Theme.Line)}};background:linear-gradient(145deg,{{Css(Theme.Fill1)}}e8,{{Css(Theme.Fill1)}}d0);color:{{Css(Theme.Text)}};font-size:16px;font-family:inherit;outline:none;
-        box-shadow:0 12px 34px #0002,inset 0 1px 0 #ffffff20;{{searchGlass}}transition:border-color .16s ease,box-shadow .16s ease,transform .16s ease}
-        .search input:focus{border-color:{{Css(Theme.Accent)}};box-shadow:0 0 0 3px {{Css(Theme.Accent)}}28,0 16px 38px #0003;transform:translateY(-1px)}
-        input:focus,textarea:focus{border-color:{{Css(Theme.Accent)}}!important;box-shadow:0 0 0 3px {{Css(Theme.Accent)}}22}
-        .grid{display:grid;grid-template-columns:1.2fr 1fr;gap:14px}.card[hidden]{display:none}.card{background:{{cardSurface}};border:1px solid {{Css(Theme.Line)}};
-        border-radius:18px;padding:18px;{{cardFilter}}{{cardGlass}}min-height:170px;transition:transform .16s ease,border-color .16s ease,box-shadow .16s ease}.card:hover{transform:translateY(-2px);border-color:{{Css(Theme.Accent)}}66}.card h2{font-size:12px;text-transform:uppercase;letter-spacing:.1em;color:{{Css(Theme.Muted)}};margin:0 0 14px}
-        .links{display:flex;flex-wrap:wrap;gap:9px}.link{color:{{Css(Theme.Text)}};background:{{Css(Theme.Fill2)}};border-radius:10px;padding:10px 12px;text-decoration:none;max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-        .link:hover{color:{{Css(Theme.Accent)}}}.empty{color:{{Css(Theme.Muted)}}}.notes{width:100%;height:116px;resize:vertical;border:1px solid {{Css(Theme.Line)}};border-radius:10px;
-        padding:10px;background:{{Css(Theme.Content)}};color:{{Css(Theme.Text)}};font:inherit;outline:none}.taskrow{display:flex;gap:8px;margin-top:10px}
-        button{border:1px solid {{Css(Theme.Line)}};background:{{Css(Theme.Fill2)}};color:{{Css(Theme.Text)}};border-radius:9px;padding:8px 12px;font:inherit;cursor:pointer}
-        .widget-menu{position:relative}.widget-menu summary{list-style:none;cursor:pointer;border:1px solid {{Css(Theme.Line)}};background:{{Css(Theme.Fill2)}};border-radius:9px;padding:8px 12px;color:{{Css(Theme.Text)}}}.widget-menu summary::-webkit-details-marker{display:none}
-        .widget-options{position:absolute;right:0;top:42px;z-index:5;min-width:210px;padding:10px;background:{{menuSurface}};{{menuGlass}}border:1px solid {{Css(Theme.Line)}};border-radius:14px;box-shadow:0 12px 34px #0005;display:grid;gap:8px}.widget-options label{display:flex;align-items:center;gap:8px;white-space:nowrap;color:{{Css(Theme.Text)}}}
-        .taskrow input{flex:1;min-width:0;border:1px solid {{Css(Theme.Line)}};border-radius:9px;padding:8px 10px;background:{{Css(Theme.Content)}};color:{{Css(Theme.Text)}};font:inherit;outline:none}
-        ul{list-style:none;padding:0;margin:0;display:grid;gap:8px}.task{display:flex;align-items:center;gap:9px}.task input{accent-color:{{Css(Theme.Accent)}}}
+        .wrap{position:relative;z-index:1;width:min(920px,92vw);margin:0 auto;padding:7vh 0 6vh}
+        header{display:flex;align-items:center;justify-content:space-between;margin-bottom:34px;color:{{Css(Theme.Muted)}}}
+        .brand{display:flex;align-items:center;gap:10px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;font-size:12px;color:{{Css(Theme.Text)}}}
+        .brand img{width:26px;height:26px;border-radius:8px}
+        .tools{display:flex;align-items:center;gap:10px}
+        .clock{text-align:right;font-variant-numeric:tabular-nums;line-height:1.25}.clock b{display:block;font-size:20px;color:{{Css(Theme.Text)}};font-weight:600}
+        .private{color:#ffc9e8;border:1px solid #a44787;border-radius:99px;padding:4px 10px;font-size:11px;letter-spacing:.08em}
+        .search{position:relative;margin:0 auto 28px;max-width:640px}
+        .search svg{position:absolute;left:18px;top:50%;transform:translateY(-50%);width:17px;height:17px;color:{{Css(Theme.Muted)}}}
+        .search input{width:100%;height:48px;padding:0 20px 0 48px;border-radius:999px;border:1px solid {{Css(Theme.Line)}};background:{{Css(Theme.Fill1)}}{{(liquidGlass && !video ? "e6" : "")}};
+          color:{{Css(Theme.Text)}};font-size:15px;font-family:inherit;outline:none;{{searchGlass}}transition:border-color .14s ease,background-color .14s ease}
+        .search input:hover{background:{{Css(Theme.Fill2)}}}
+        .search input:focus{border-color:{{Css(Theme.Accent)}};background:{{Css(Theme.Fill2)}}}
+        input:focus,textarea:focus{border-color:{{Css(Theme.Accent)}}!important}
+        .grid{display:grid;grid-template-columns:1.25fr 1fr;gap:12px}.card[hidden]{display:none}
+        .card{background:{{cardSurface}};border:1px solid {{Css(Theme.Line)}};border-radius:14px;padding:16px;{{cardFilter}}{{cardGlass}}min-height:150px;transition:border-color .14s ease}
+        .card:hover{border-color:{{Css(Theme.Muted)}}55}
+        .card h2{display:flex;align-items:center;gap:8px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.12em;color:{{Css(Theme.Muted)}};margin:0 0 12px}
+        .links{display:grid;grid-template-columns:repeat(auto-fill,minmax(88px,1fr));gap:8px}
+        .link{display:flex;flex-direction:column;align-items:center;gap:7px;padding:12px 6px 10px;border-radius:12px;color:{{Css(Theme.Text)}};text-decoration:none;min-width:0}
+        .link:hover{background:{{Css(Theme.Fill2)}}}
+        .fav{width:34px;height:34px;border-radius:10px;background:{{Css(Theme.Fill2)}};border:1px solid {{Css(Theme.Line)}};display:grid;place-items:center;font-weight:600;font-size:14px;color:{{Css(Theme.Text)}};overflow:hidden}
+        .fav img{width:18px;height:18px}
+        .link .t{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:{{Css(Theme.Muted)}}}.link:hover .t{color:{{Css(Theme.Text)}}}
+        .empty{color:{{Css(Theme.Muted)}};grid-column:1/-1}
+        .notes{width:100%;height:104px;resize:vertical;border:1px solid {{Css(Theme.Line)}};border-radius:10px;padding:10px;background:{{Css(Theme.Content)}};color:{{Css(Theme.Text)}};font:inherit;outline:none}
+        .taskrow{display:flex;gap:8px;margin-top:10px}
+        button,.widget-menu summary{display:inline-flex;align-items:center;gap:7px;border:1px solid {{Css(Theme.Line)}};background:{{Css(Theme.Fill1)}};color:{{Css(Theme.Text)}};border-radius:999px;padding:7px 13px;font:inherit;cursor:pointer}
+        button:hover,.widget-menu summary:hover{background:{{Css(Theme.Fill2)}}}
+        .widget-menu{position:relative}.widget-menu summary{list-style:none}.widget-menu summary::-webkit-details-marker{display:none}
+        .widget-options{position:absolute;right:0;top:40px;z-index:5;min-width:200px;padding:8px;background:{{menuSurface}};{{menuGlass}}border:1px solid {{Css(Theme.Line)}};border-radius:12px;box-shadow:0 12px 30px #0006;display:grid;gap:2px}
+        .widget-options label{display:flex;align-items:center;gap:9px;white-space:nowrap;color:{{Css(Theme.Text)}};padding:7px 8px;border-radius:8px}.widget-options label:hover{background:{{Css(Theme.Fill2)}}}
+        .widget-options input,.task input{accent-color:{{Css(Theme.Accent)}}}
+        .taskrow input{flex:1;min-width:0;border:1px solid {{Css(Theme.Line)}};border-radius:999px;padding:8px 13px;background:{{Css(Theme.Content)}};color:{{Css(Theme.Text)}};font:inherit;outline:none}
+        ul{list-style:none;padding:0;margin:0;display:grid;gap:6px}.task{display:flex;align-items:center;gap:9px}
         .task span{flex:1;overflow-wrap:anywhere}.task.done span{text-decoration:line-through;color:{{Css(Theme.Muted)}}}.remove{border:0;background:none;color:{{Css(Theme.Muted)}};padding:2px 6px}
-        footer{text-align:center;color:{{Css(Theme.Muted)}};font-size:12px;margin-top:18px}
+        .privacy p{margin:0 0 8px;line-height:1.45}
+        footer{text-align:center;color:{{Css(Theme.Muted)}};font-size:11px;margin-top:18px;opacity:.8}
         {{cursorCss}}
-        @media(max-width:700px){.grid{grid-template-columns:1fr}
-        .wrap{padding-top:3vh}.card{min-height:unset}
-        }
-        @media(prefers-reduced-motion:reduce){*,*:before,*:after{transition:none!important;scroll-behavior:auto!important;transform:none!important} }
+        @media(max-width:700px){.grid{grid-template-columns:1fr}.wrap{padding-top:3vh}.card{min-height:unset} }
+        @media(prefers-reduced-motion:reduce){*,*:before,*:after{transition:none!important;scroll-behavior:auto!important} }
         </style>
         {{videoLayer}}
         <main class=wrap>
-          <header><div class=brand><img id=mark src="{{logo}}" alt="{{App.Name}}"><span>{{App.Name}}</span></div>
-            <div style="display:flex;align-items:center;gap:10px">{{privateBadge}}<details class=widget-menu><summary>Widgets</summary><div class=widget-options>{{widgetOptions}}</div></details><div id=widget-clock class=clock {{WidgetVisibility("clock")}}><b id=time></b><span id=date></span></div></div>
+          <header><div class=brand><img id=mark src="{{logo}}" alt=""><span>Baka</span></div>
+            <div class=tools>{{privateBadge}}<details class=widget-menu><summary>{{IconSliders}}Widgets</summary><div class=widget-options>{{widgetOptions}}</div></details><div id=widget-clock class=clock {{WidgetVisibility("clock")}}><b id=time></b><span id=date></span></div></div>
           </header>
-          <form class=search id=search><input id=q autofocus autocomplete=off placeholder="Search or enter address" aria-label="Search or enter address"></form>
+          <form class=search id=search>{{IconSearch}}<input id=q autofocus autocomplete=off placeholder="Search or enter address" aria-label="Search or enter address"></form>
           <section class=grid>
-            <article id=widget-quicklinks class=card {{WidgetVisibility("quicklinks")}}><h2>Quick links</h2><div class=links>{{links}}</div></article>
-            <article id=widget-notes class=card {{WidgetVisibility("notes")}}><h2>Notes</h2><textarea class=notes id=notes maxlength=4000 placeholder="A private scratchpad saved on this device"></textarea></article>
-            <article id=widget-tasks class=card {{WidgetVisibility("tasks")}}><h2>Tasks</h2><ul id=tasks></ul><div class=taskrow><input id=newtask maxlength=140 placeholder="Add a task"><button id=addtask type=button>Add</button></div></article>
-            <article id=widget-privacy class=card {{WidgetVisibility("privacy")}}><h2>Privacy</h2><p>{{privateText}}</p><p style="color:{{Css(Theme.Muted)}}">No weather calls or dashboard data are sent to a service.</p></article>
+            <article id=widget-quicklinks class=card {{WidgetVisibility("quicklinks")}}><h2>{{IconLink}}Quick links</h2><div class=links>{{links}}</div></article>
+            <article id=widget-notes class=card {{WidgetVisibility("notes")}}><h2>{{IconNote}}Notes</h2><textarea class=notes id=notes maxlength=4000 placeholder="A private scratchpad saved on this device"></textarea></article>
+            <article id=widget-tasks class=card {{WidgetVisibility("tasks")}}><h2>{{IconTasks}}Tasks</h2><ul id=tasks></ul><div class=taskrow><input id=newtask maxlength=140 placeholder="Add a task"><button id=addtask type=button>Add</button></div></article>
+            <article id=widget-privacy class="card privacy" {{WidgetVisibility("privacy")}}><h2>{{IconShield}}Privacy</h2><p>{{privateText}}</p><p style="color:{{Css(Theme.Muted)}}">No weather calls or dashboard data are sent to a service.</p></article>
           </section>
           <footer>Dashboard data stays in this browser profile. Private windows keep it only for this session.</footer>
         </main>
