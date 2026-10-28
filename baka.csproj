@@ -10,7 +10,7 @@
     <RootNamespace>Baka</RootNamespace>
     <ApplicationIcon>baka.ico</ApplicationIcon>
     <!-- the installer reads this, so bump it here and nowhere else -->
-    <Version>1.6.1</Version>
+    <Version>1.6.2</Version>
     <Company>baka</Company>
     <Product>baka</Product>
     <!-- publish/ is what the installer harvests; the symbols and the duplicate native copy are not wanted -->

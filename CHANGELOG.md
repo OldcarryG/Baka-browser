@@ -2,6 +2,16 @@
 
 Notable changes to Baka Browser are recorded here. Versions are published as GitHub Releases by pushing a matching `vMAJOR.MINOR.PATCH` tag.
 
+## [1.6.2] - 2026-10-28
+
+### Fixed
+
+- A video chosen as the new-tab background (Settings > Appearance > "Choose image or video…") did not play: it stayed at readyState 0 (.webm) or failed with MEDIA_ERR_SRC_NOT_SUPPORTED (.mp4). WebView2's folder mapping did not serve the media requests. `https://baka-assets.local/` is now served by the browser itself, with byte-range (206) responses so video can seek and stream.
+
+### Added
+
+- UI test steps that record a short .webm and .mp4 clip, set each as the background and check that it plays.
+
 ## [1.6.1] - 2026-10-28
 
 ### Fixed

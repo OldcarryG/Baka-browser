@@ -109,6 +109,52 @@ sealed partial class BrowserForm
         note("4K decoding: " + media);
         step(media.Contains("VP9 4K60: yes", StringComparison.Ordinal) && media.Contains("AV1 4K60: yes", StringComparison.Ordinal),
             "4K VP9 and AV1 video (YouTube's 4K formats) are supported");
+
+        await RunBackgroundVideoCheckAsync(step, note, wait, reportDir);
+    }
+
+    /// The new-tab background video, the way Settings > Appearance > "Choose image or video…" stores it:
+    /// a real video is recorded in the page (canvas + MediaRecorder), saved as the background, and the
+    /// new-tab page must actually play it (time moving, no media error).
+    async Task RunBackgroundVideoCheckAsync(Action<bool, string> step, Action<string> note, Func<int, Task> wait, string reportDir)
+    {
+        var oldBackground = Config.Current.HomeBackgroundFile;
+        foreach (var (mime, ext) in new[] { ("video/webm;codecs=vp9", ".webm"), ("video/mp4;codecs=avc1.42E01E", ".mp4") })
+        {
+            var source = Path.Combine(reportDir, "background-test" + ext);
+            try
+            {
+                var maker = await NewTabAsync(null, html: "<!doctype html><title>make video</title><canvas id=c width=640 height=360></canvas>");
+                await wait(1200);
+                if (maker?.View.CoreWebView2 is not { } mcore) { step(false, "background video: no tab"); continue; }
+                var b64 = await EvalAwaitAsync(mcore, "(async()=>{const m='" + mime + "';if(!MediaRecorder.isTypeSupported(m))return 'unsupported';" +
+                    "const c=document.getElementById('c'),x=c.getContext('2d');const s=c.captureStream(30);const r=new MediaRecorder(s,{mimeType:m});const parts=[];r.ondataavailable=e=>parts.push(e.data);" +
+                    "let f=0;const t=setInterval(()=>{x.fillStyle='hsl('+(f*7%360)+',70%,45%)';x.fillRect(0,0,640,360);x.fillStyle='#fff';x.font='60px sans-serif';x.fillText('BAKA '+f++,40,200)},33);" +
+                    "r.start(250);await new Promise(ok=>setTimeout(ok,3000));r.stop();await new Promise(ok=>r.onstop=ok);clearInterval(t);" +
+                    "const buf=new Uint8Array(await new Blob(parts,{type:m}).arrayBuffer());let s2='';for(let i=0;i<buf.length;i+=32768)s2+=String.fromCharCode.apply(null,buf.subarray(i,i+32768));return btoa(s2)})()");
+                CloseTab(_open.IndexOf(maker));
+                if (b64 == "unsupported" || b64.StartsWith("error", StringComparison.Ordinal)) { note($"background video {ext}: the engine cannot record {mime} ({b64}); skipped"); continue; }
+                File.WriteAllBytes(source, Convert.FromBase64String(b64));
+                note($"background video {ext}: test file {new FileInfo(source).Length:N0} bytes");
+                // exactly what ChooseBackground does
+                var name = "home-background" + ext;
+                SettingsForm.ReplaceManagedFile(source, Path.Combine(App.HomeBackgroundDirectory, name));
+                Config.Current.HomeBackgroundFile = name;
+                var home = await NewTabAsync(null);
+                await wait(4000);
+                var state = home?.View.CoreWebView2 is { } hcore ? await EvalAwaitAsync(hcore,
+                    "(async()=>{const v=document.querySelector('.wallpaper video');if(!v)return 'no video element';await new Promise(ok=>setTimeout(ok,1500));" +
+                    "return JSON.stringify({src:v.currentSrc,ready:v.readyState,net:v.networkState,paused:v.paused,time:v.currentTime,error:v.error?v.error.code+' '+v.error.message:null})})()") : "no tab";
+                note($"background video {ext}: {state}");
+                double time = 0;
+                try { using var d = JsonDocument.Parse(state); time = d.RootElement.GetProperty("time").GetDouble(); } catch { }
+                step(time > 0.3, $"the new-tab background video plays ({ext})");
+                if (home is not null) CloseTab(_open.IndexOf(home));
+            }
+            catch (Exception ex) { step(false, $"background video {ext}: {ex.Message}"); }
+            finally { try { File.Delete(source); } catch { } }
+        }
+        Config.Current.HomeBackgroundFile = oldBackground;
     }
 
     /// ExecuteScriptAsync does not wait for promises (it returns "{}"), so async checks go through CDP.

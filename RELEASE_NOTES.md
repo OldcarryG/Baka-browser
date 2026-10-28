@@ -1,6 +1,10 @@
-# Baka Browser 1.6.1 Release
+# Baka Browser 1.6.2 Release
 
-A fix for the new-tab background picker, on top of 1.6.0.
+Background videos on the new-tab page now play.
+
+## Fixed in 1.6.2
+
+- **New-tab background video plays.** A .webm or .mp4 picked under Settings > Appearance > "Choose image or video…" showed a still or blank page. The browser now serves the file itself, with byte-range support, and the UI test checks that both formats play.
 
 ## Fixed in 1.6.1
 

@@ -728,8 +728,56 @@ sealed partial class BrowserForm : Form, IExtensionHost
         return false;
     }
 
+    // The new-tab background (image or video) is answered here, not through WebView2's folder mapping:
+    // with the mapping, a background video never started (readyState 0, stuck loading) because video
+    // players fetch byte ranges. This answers Range requests with 206 and the right Content-Type.
+    static bool TryServeHomeAsset(CoreWebView2 core, CoreWebView2WebResourceRequestedEventArgs e)
+    {
+        if (!Uri.TryCreate(e.Request.Uri, UriKind.Absolute, out var uri) ||
+            !uri.Host.Equals(App.HomeBackgroundHost, StringComparison.OrdinalIgnoreCase)) return false;
+        try
+        {
+            var name = Uri.UnescapeDataString(uri.AbsolutePath.TrimStart('/'));
+            var path = Path.Combine(App.HomeBackgroundDirectory, name);
+            if (!App.IsHomeBackgroundName(name) || !File.Exists(path))
+            {
+                e.Response = core.Environment.CreateWebResourceResponse(null, 404, "Not Found", "");
+                return true;
+            }
+            var type = Path.GetExtension(name).ToLowerInvariant() switch
+            {
+                ".mp4" or ".m4v" => "video/mp4", ".webm" => "video/webm", ".png" => "image/png", _ => "image/jpeg",
+            };
+            long length = new FileInfo(path).Length, start = 0, end = length - 1;
+            var partial = false;
+            var range = e.Request.Headers.Contains("Range") ? e.Request.Headers.GetHeader("Range") : "";
+            var m = System.Text.RegularExpressions.Regex.Match(range, @"bytes=(\d*)-(\d*)");
+            if (m.Success && length > 0)
+            {
+                partial = true;
+                if (m.Groups[1].Value.Length > 0) start = Math.Min(long.Parse(m.Groups[1].Value), length - 1);
+                if (m.Groups[2].Value.Length > 0) end = Math.Min(long.Parse(m.Groups[2].Value), length - 1);
+                else if (m.Groups[1].Value.Length == 0 && m.Groups[2].Value.Length > 0) { start = Math.Max(0, length - long.Parse(m.Groups[2].Value)); end = length - 1; }
+                end = Math.Min(end, start + 8 * 1024 * 1024 - 1); // at most 8 MB per answer; the player asks for the rest
+            }
+            var count = (int)Math.Max(0, end - start + 1);
+            var data = new byte[count];
+            using (var f = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            {
+                f.Seek(start, SeekOrigin.Begin);
+                var read = 0; while (read < count) { var n = f.Read(data, read, count - read); if (n <= 0) break; read += n; }
+            }
+            var headers = $"Content-Type: {type}\r\nAccept-Ranges: bytes\r\nContent-Length: {count}\r\nCache-Control: no-store";
+            if (partial) headers += $"\r\nContent-Range: bytes {start}-{start + count - 1}/{length}";
+            e.Response = core.Environment.CreateWebResourceResponse(new MemoryStream(data, false), partial ? 206 : 200, partial ? "Partial Content" : "OK", headers);
+        }
+        catch { e.Response = core.Environment.CreateWebResourceResponse(null, 500, "Error", ""); }
+        return true;
+    }
+
     static void HandleWebResourceRequest(CoreWebView2 core, CoreWebView2WebResourceRequestedEventArgs e)
     {
+        if (TryServeHomeAsset(core, e)) return;
         var blockedImage = e.ResourceContext == CoreWebView2WebResourceContext.Image && !Config.Current.ImagesEnabled;
         var blockedTracker = false;
         if (Config.Current.BuiltInBlockingEnabled && TryGetHttpHost(e.Request.Uri, out var host))
@@ -844,26 +892,13 @@ sealed partial class BrowserForm : Form, IExtensionHost
 
     static void MapHomeAssets(Tab tab)
     {
+        // The background is served by TryServeHomeAsset now; only an old folder mapping is removed here.
         if (tab.View.CoreWebView2 is not { } core) return;
-        if (App.HomeBackgroundUrl.Length == 0)
+        if (tab.HomeAssetsMapped)
         {
-            if (tab.HomeAssetsMapped)
-            {
-                try { core.ClearVirtualHostNameToFolderMapping(App.HomeBackgroundHost); } catch { }
-                tab.HomeAssetsMapped = false;
-            }
-            return;
+            try { core.ClearVirtualHostNameToFolderMapping(App.HomeBackgroundHost); } catch { }
+            tab.HomeAssetsMapped = false;
         }
-        try
-        {
-            Directory.CreateDirectory(App.HomeBackgroundDirectory);
-            if (tab.HomeAssetsMapped)
-                core.ClearVirtualHostNameToFolderMapping(App.HomeBackgroundHost);
-            core.SetVirtualHostNameToFolderMapping(App.HomeBackgroundHost, App.HomeBackgroundDirectory,
-                CoreWebView2HostResourceAccessKind.Allow);
-            tab.HomeAssetsMapped = true;
-        }
-        catch { tab.HomeAssetsMapped = false; }
     }
 
     async Task WireAsync(Tab tab)
@@ -894,6 +929,9 @@ sealed partial class BrowserForm : Form, IExtensionHost
         tab.DefaultUserAgent = core.Settings.UserAgent;
         ApplyPagePreferences(core, tab.DefaultUserAgent);
         core.WebResourceRequested += (_, e) => HandleWebResourceRequest(core, e);
+        // the new-tab background is always answered by TryServeHomeAsset, whatever the blocking settings
+        core.AddWebResourceRequestedFilter($"https://{App.HomeBackgroundHost}/*", CoreWebView2WebResourceContext.All,
+            CoreWebView2WebResourceRequestSourceKinds.All);
         ConfigureResourceFiltering(tab);
         core.WebMessageReceived += (_, e) => SaveDashboardMessage(tab, e);
 
