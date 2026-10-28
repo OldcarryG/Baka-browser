@@ -11,6 +11,10 @@ static class Theme
 {
     public static bool GlassOn { get; private set; }
     public static bool CustomMode => Config.Current.ThemeMode == "Custom";
+    /// BAKA: the Carbon Mono palette of BAKA Windows (graphite glass, white type, a white accent), so the
+    /// browser reads as part of the desktop instead of a separate app. Default on new installs.
+    public static bool BakaMode => Config.Current.ThemeMode == "Baka";
+    static Color Hex(int rgb) => Color.FromArgb((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
     static Color CustomSurface
     {
         get
@@ -40,23 +44,23 @@ static class Theme
             ? Color.FromArgb(0x24, 0x24, 0x26) : Color.FromArgb(0xF7, 0xF7, 0xF9);
 
     // Dark and light system palettes. Custom keeps the dark surfaces and changes the accent.
-    public static Color Content => CustomMode ? CustomSurface
+    public static Color Content => CustomMode ? CustomSurface : BakaMode ? Hex(0x161619)
         : DarkMode ? Color.FromArgb(0x1C, 0x1C, 0x1E) : Color.FromArgb(0xFA, 0xFA, 0xFC);
     /// The tab row has to be opaque (see TabStrip), so it cannot be glass — but Content is twice as
     /// bright as Mica-over-black measures (~#0D0A0E here), which read as a pale band across the top.
     /// This is close enough to the backdrop that the seam disappears.
-    public static Color Strip => CustomMode ? Blend(Content, DarkMode ? Color.Black : Color.White, 0.22f)
+    public static Color Strip => CustomMode ? Blend(Content, DarkMode ? Color.Black : Color.White, 0.22f) : BakaMode ? Hex(0x0B0B0D)
         : DarkMode ? Color.FromArgb(0x10, 0x10, 0x12) : Color.FromArgb(0xEF, 0xEF, 0xF3);
-    public static Color Fill1 => CustomMode ? Blend(Content, DarkMode ? Color.White : Color.Black, 0.07f)
+    public static Color Fill1 => CustomMode ? Blend(Content, DarkMode ? Color.White : Color.Black, 0.07f) : BakaMode ? Hex(0x1F1F23)
         : DarkMode ? Color.FromArgb(0x2C, 0x2C, 0x2E) : Color.White;
-    public static Color Fill2 => CustomMode ? Blend(Content, DarkMode ? Color.White : Color.Black, 0.14f)
+    public static Color Fill2 => CustomMode ? Blend(Content, DarkMode ? Color.White : Color.Black, 0.14f) : BakaMode ? Hex(0x27272A)
         : DarkMode ? Color.FromArgb(0x3A, 0x3A, 0x3C) : Color.FromArgb(0xF2, 0xF2, 0xF6);
-    public static Color Fill3 => CustomMode ? Blend(Content, DarkMode ? Color.White : Color.Black, 0.22f)
+    public static Color Fill3 => CustomMode ? Blend(Content, DarkMode ? Color.White : Color.Black, 0.22f) : BakaMode ? Hex(0x34343A)
         : DarkMode ? Color.FromArgb(0x48, 0x48, 0x4A) : Color.FromArgb(0xE5, 0xE5, 0xEA);
-    public static Color Text => DarkMode ? Color.FromArgb(0xF2, 0xF2, 0xF7) : Color.FromArgb(0x1C, 0x1C, 0x1E);
+    public static Color Text => BakaMode ? Hex(0xFAFAFA) : DarkMode ? Color.FromArgb(0xF2, 0xF2, 0xF7) : Color.FromArgb(0x1C, 0x1C, 0x1E);
     /// secondaryLabel, which on Apple's dark backgrounds is white at 60% rather than systemGray:
     /// #8E8E93 only made 4.06:1 against Fill1, under the 4.5:1 floor for text this size. This makes 5.3:1.
-    public static Color Muted => DarkMode ? Color.FromArgb(0x9E, 0x9E, 0xA3) : Color.FromArgb(0x63, 0x63, 0x66);
+    public static Color Muted => BakaMode ? Hex(0xA1A1AA) : DarkMode ? Color.FromArgb(0x9E, 0x9E, 0xA3) : Color.FromArgb(0x63, 0x63, 0x66);
     static string? _accentValue;
     static Color _accentColor;
     public static Color Accent
@@ -72,7 +76,7 @@ static class Theme
             return _accentColor;
         }
     }
-    public static Color Line => CustomMode ? Blend(Content, DarkMode ? Color.White : Color.Black, 0.28f)
+    public static Color Line => CustomMode ? Blend(Content, DarkMode ? Color.White : Color.Black, 0.28f) : BakaMode ? Hex(0x3F3F46)
         : DarkMode ? Color.FromArgb(0x38, 0x38, 0x3A) : Color.FromArgb(0xD1, 0xD1, 0xD6);
     /// systemRed, lightened. This keeps error and warning text readable against a card background.
     public static Color Bad => DarkMode ? Color.FromArgb(0xFF, 0x69, 0x61) : Color.FromArgb(0xD7, 0x00, 0x15);

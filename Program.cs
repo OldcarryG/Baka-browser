@@ -140,8 +140,8 @@ sealed class Config
     public bool ImagesEnabled { get; set; } = true;
     public bool BuiltInBlockingEnabled { get; set; } = true;
     public bool SendPrivacySignals { get; set; } = true;
-    public string ThemeMode { get; set; } = "Dark";
-    public string AccentColor { get; set; } = "#0A84FF";
+    public string ThemeMode { get; set; } = "Baka";
+    public string AccentColor { get; set; } = "#E4E4E7";
     public string CustomBackgroundColor { get; set; } = "#30243B";
     public bool LiquidGlassEnabled { get; set; } = true;
     public bool RestoreLastSession { get; set; } = true;
@@ -174,7 +174,7 @@ sealed class Config
             Current = new Config();
         }
 
-        if (Current.ThemeMode is not ("Dark" or "Light" or "Custom")) Current.ThemeMode = "Dark";
+        if (Current.ThemeMode is not ("Baka" or "Dark" or "Light" or "Custom")) Current.ThemeMode = "Baka";
         if (!System.Text.RegularExpressions.Regex.IsMatch(Current.AccentColor ?? "", "^#[0-9A-Fa-f]{6}$"))
             Current.AccentColor = "#0A84FF";
         if (!System.Text.RegularExpressions.Regex.IsMatch(Current.CustomBackgroundColor ?? "", "^#[0-9A-Fa-f]{6}$"))

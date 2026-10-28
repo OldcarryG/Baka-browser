@@ -1,16 +1,12 @@
-# Baka Browser 1.2.0 Release
+# Baka Browser 1.3.0 Release
 
-This release improves local privacy controls and background-tab reliability, restores regular tabs on restart, and adds a one-click Windows installer with automatic update packages.
+This release adds the BAKA theme so the browser matches the BAKA Windows desktop.
 
 ## What's new
 
-- Install the Windows x64 build with `BakaBrowser-Setup.exe`; setup installs per-user and can bootstrap WebView2 when it is missing.
-- Installed copies quietly download updates and apply them the next time the browser starts.
-- Update or remove an optional locally cached ad/tracker hosts list from Settings.
-- Regular windows now save their open tabs and selected tab at close.
-- Idle suspension skips tabs that are still loading or playing audio and recovers from a tab becoming active during suspension.
-- CI builds the Windows app for pushes and pull requests.
+- New **Baka** theme (now the default on new installs): the Carbon Mono palette of BAKA Windows, with graphite glass surfaces, white text, and a soft white accent on the tabs, address bar, and new-tab dashboard.
+- Settings > Appearance > Theme lists Baka next to Dark, Light, and Custom. Existing installs keep the theme they already chose.
 
 ## Privacy and compatibility
 
-Ad blocking remains domain-based and may miss ads served by the page's own domain. The browser still uses WebView2/Chromium; this release does not remove the Chromium engine. See the README for details and current limitations.
+Ad blocking remains domain-based and may miss ads served by the page's own domain. The browser still uses WebView2/Chromium. See the README for details and current limitations.

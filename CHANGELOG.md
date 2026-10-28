@@ -2,6 +2,16 @@
 
 Notable changes to Baka Browser are recorded here. Versions are published as GitHub Releases by pushing a matching `vMAJOR.MINOR.PATCH` tag.
 
+## [1.3.0] - 2026-10-28
+
+### Added
+
+- Baka theme: the BAKA Windows Carbon Mono palette (graphite surfaces, white text and accent). Default for new installs; listed in Settings > Appearance.
+
+### Changed
+
+- Default accent for new installs is #E4E4E7 (soft white) to match BAKA Windows.
+
 ## [1.2.0] - 2026-10-10
 
 ### Added

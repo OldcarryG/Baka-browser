@@ -82,7 +82,7 @@ sealed class SettingsForm : Form
         Note($"Rules are stored locally. Custom block lists accept up to {PrivacyRules.CustomLimit} domains; imported text supports hosts files and one-domain-per-line lists.");
 
         Header("Appearance");
-        Dropdown("Theme", ["Dark", "Light", "Custom"], Config.Current.ThemeMode,
+        Dropdown("Theme", ["Baka", "Dark", "Light", "Custom"], Config.Current.ThemeMode,
             v => Config.Current.ThemeMode = v);
         Toggle("Liquid-glass browser chrome and dashboard", Config.Current.LiquidGlassEnabled,
             v => Config.Current.LiquidGlassEnabled = v);
