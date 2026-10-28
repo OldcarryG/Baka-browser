@@ -2,6 +2,28 @@
 
 Notable changes to Baka Browser are recorded here. Versions are published as GitHub Releases by pushing a matching `vMAJOR.MINOR.PATCH` tag.
 
+## [1.6.0] - 2026-10-28
+
+### Added
+
+- Tab right-click menu: New tab, Reload, Duplicate, Mute/Unmute site, Copy address, Move to new window, Close tab, Close other tabs, Close tabs below/right, Reopen closed tab.
+- Drag tabs to reorder; drag a tab off the strip to open it in its own window at the drop point (`--detached` process).
+- Speaker icon on tabs that play audio; click to mute the site.
+- `Ctrl+Shift+T` reopens closed tabs (last 25); `Ctrl+1`…`Ctrl+8` select a tab, `Ctrl+9` the last tab.
+- UI test steps for the tab menu, reorder, reopen, tear-off, background-tab close and mute.
+
+### Changed
+
+- Tabs playing audio keep the normal memory level.
+- Detached windows do not save the session, settings or history of the main window, and do not add the default ad blocker again.
+- Removed dead code (unused display menu, flat theme switch, unused overloads and fields, private-profile deletion helper).
+
+### Fixed
+
+- Closing a background tab no longer changes the selected tab.
+- `Ctrl+W` pressed inside a page closes the tab reliably.
+- Zoom changes apply to open tabs immediately.
+
 ## [1.5.0] - 2026-10-28
 
 ### Added

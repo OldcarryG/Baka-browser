@@ -160,7 +160,7 @@ static class Theme
         Delete = "\uE74D", Paint = "\uE790", Lightning = "\uE945", Code = "\uE943", BookmarkList = "\uE728",
         Tabs = "\uE7C4", Print = "\uE749", ZoomIn = "\uE8A3", ZoomOut = "\uE71F", Store = "\uE719",
         Check = "\uE73E", Sync = "\uE895", OpenNew = "\uE8A7", Copy = "\uE8C8", Picture = "\uE8B9",
-        Mouse = "\uE962", Link = "\uE71B", Window = "\uE737";
+        Mouse = "\uE962", Link = "\uE71B", Window = "\uE737", Volume = "\uE767", MuteIcon = "\uE74F", Undo = "\uE7A7";
 
     /// A glyph rendered once into a bitmap, for places that take an Image (menu items). Cached by
     /// glyph, size and colour; the cache is cleared when the theme changes.
@@ -271,22 +271,6 @@ static class Theme
     }
 
     /// Flat dark button. WinForms' stock button ignores BackColor unless FlatStyle is Flat.
-    public static Button Flat(string text)
-    {
-        var b = new Button
-        {
-            Text = text,
-            FlatStyle = FlatStyle.Flat,
-            BackColor = Fill2,
-            ForeColor = Text,
-            UseVisualStyleBackColor = false,
-            Cursor = Cursors.Hand,
-        };
-        b.FlatAppearance.BorderColor = Line;
-        b.FlatAppearance.MouseOverBackColor = Fill3;
-        return b;
-    }
-
     [DllImport("dwmapi.dll")]
     static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
 
@@ -582,7 +566,8 @@ sealed class StripTab
     public string Title = "New tab";
     /// The site's own favicon at 16 px, owned by the strip and disposed when it changes or the tab closes.
     public Image? Icon;
-    public object? Tag;
+    /// The page is playing sound / the site is muted (drawn as a speaker in place of the icon).
+    public bool Audio, Muted;
 }
 
 /// Safari-style tab strip: rounded pills, only the active and hovered ones filled, per-tab close,
@@ -619,6 +604,47 @@ sealed class TabStrip : Control
     public event Action<int>? SelectionChanged;
     public event Action<int>? CloseClicked;
     public event Action? NewTabClicked;
+    /// The speaker on a tab that is playing sound (or muted) was clicked.
+    public event Action<int>? AudioClicked;
+    /// Right-click on a tab: index and the screen point to open the menu at.
+    public event Action<int, Point>? TabMenuRequested;
+    /// A tab dragged along the strip to a new position (from, to).
+    public event Action<int, int>? TabMoved;
+    /// A tab dragged off the strip and dropped: index and the screen point it was dropped at.
+    public event Action<int, Point>? TabDraggedOut;
+
+    // Dragging: starts after the pointer moves a few pixels with the left button down on a tab.
+    int _dragIndex = -1;
+    Point _dragStart;
+    bool _dragging;
+    static readonly int DragThreshold = Theme.S(6), TearOffDistance = Theme.S(48);
+
+    /// True while the pointer is far enough from the strip that letting go opens a new window.
+    bool TearingOff(Point p)
+    {
+        var r = ClientRectangle;
+        r.Inflate(TearOffDistance, TearOffDistance);
+        return !r.Contains(p);
+    }
+
+    int SlotAt(Point p)
+    {
+        if (Tabs.Count == 0) return -1;
+        if (Vertical) return Math.Clamp((p.Y - RailTop + _scrollOffset) / Math.Max(1, Theme.RailRow), 0, Tabs.Count - 1);
+        return Math.Clamp((p.X - Edge) / Math.Max(1, TabWidth + Gap), 0, Tabs.Count - 1);
+    }
+
+    /// Moves a tab inside the strip, keeping the selected tab selected (the form mirrors the move).
+    public void MoveTab(int from, int to)
+    {
+        if (from == to || from < 0 || to < 0 || from >= Tabs.Count || to >= Tabs.Count) return;
+        var selected = SelectedIndex >= 0 && SelectedIndex < Tabs.Count ? Tabs[SelectedIndex] : null;
+        var t = Tabs[from];
+        Tabs.RemoveAt(from);
+        Tabs.Insert(to, t);
+        if (selected is not null) SelectedIndex = Tabs.IndexOf(selected);
+        Invalidate();
+    }
 
     public TabStrip()
     {
@@ -640,11 +666,13 @@ sealed class TabStrip : Control
         SelectionChanged?.Invoke(index);
     }
 
-    /// Selection follows the list after a removal, without firing for an index that no longer exists.
-    public void Removed(int index)
+    /// Called after a tab was removed from Tabs, with the tab that should be selected now. Hover and drag
+    /// state are reset: they pointed at positions that just shifted.
+    public void Removed(int select)
     {
+        (_hotTab, _hotClose, _dragIndex, _dragging) = (-1, -1, -1, false);
         if (Tabs.Count == 0) { SelectedIndex = -1; Invalidate(); return; }
-        SelectedIndex = Math.Clamp(index >= Tabs.Count ? Tabs.Count - 1 : index, 0, Tabs.Count - 1);
+        SelectedIndex = Math.Clamp(select, 0, Tabs.Count - 1);
         Invalidate();
         SelectionChanged?.Invoke(SelectedIndex);
     }
@@ -664,6 +692,23 @@ sealed class TabStrip : Control
         ? new Rectangle(Theme.S(6), RailTop + i * Theme.RailRow - _scrollOffset,
             Math.Max(Theme.S(34), Width - Theme.S(12)), Theme.RailRowHeight)
         : new Rectangle(Edge + i * (TabWidth + Gap), Inset, TabWidth, Height - Inset * 2);
+
+    /// Where the tab's site icon sits; a tab playing sound shows a speaker there instead, and clicking it mutes.
+    Rectangle MarkRect(int i)
+    {
+        var r = TabRect(i);
+        return Vertical && Compact
+            ? new Rectangle(r.X + (r.Width - IconBox) / 2, r.Y + (r.Height - IconBox) / 2, IconBox, IconBox)
+            : new Rectangle(r.X + Theme.S(10), r.Y + (r.Height - IconBox) / 2, IconBox, IconBox);
+    }
+
+    void DrawMark(Graphics g, StripTab tab, Rectangle mark)
+    {
+        if (tab.Muted || tab.Audio)
+            Draw.Glyph(g, tab.Muted ? Theme.MuteIcon : Theme.Volume, _iconFont, tab.Muted ? Theme.Muted : Theme.Accent, mark);
+        else if (tab.Icon is { } icon) g.DrawImage(icon, mark);
+        else Draw.Glyph(g, Theme.Globe, _iconFont, Theme.Muted, mark);
+    }
 
     Rectangle CloseRect(int i)
     {
@@ -722,6 +767,12 @@ sealed class TabStrip : Control
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
+        if (_dragIndex >= 0 && (MouseButtons & MouseButtons.Left) != 0)
+        {
+            DragTo(e.Location);
+            if (_dragging) { base.OnMouseMove(e); return; }
+        }
+        else if (_dragIndex >= 0) EndDrag();
         int tab = -1, close = -1;
         for (var i = 0; i < Tabs.Count; i++)
             if (TabRect(i).Contains(e.Location))
@@ -780,9 +831,65 @@ sealed class TabStrip : Control
             if (e.Button == MouseButtons.Middle ||
                 (e.Button == MouseButtons.Left && !Compact && CloseRect(i).Contains(e.Location)))
                 CloseClicked?.Invoke(i);
+            else if (e.Button == MouseButtons.Left && (Tabs[i].Audio || Tabs[i].Muted) && MarkRect(i).Contains(e.Location))
+                AudioClicked?.Invoke(i);
             else if (e.Button == MouseButtons.Left)
+            {
                 Select(i);
+                (_dragIndex, _dragStart, _dragging) = (i, e.Location, false);
+            }
+            else if (e.Button == MouseButtons.Right)
+            {
+                Select(i);
+                TabMenuRequested?.Invoke(i, PointToScreen(e.Location));
+            }
             return;
+        }
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        base.OnMouseUp(e);
+        if (e.Button != MouseButtons.Left) return;
+        var (index, dragging) = (_dragIndex, _dragging);
+        EndDrag();
+        if (dragging && index >= 0 && index < Tabs.Count && TearingOff(e.Location))
+            TabDraggedOut?.Invoke(index, PointToScreen(e.Location));
+    }
+
+    protected override void OnMouseCaptureChanged(EventArgs e)
+    {
+        if (!Capture && _dragging) EndDrag();
+        base.OnMouseCaptureChanged(e);
+    }
+
+    void EndDrag()
+    {
+        var was = _dragging;
+        (_dragIndex, _dragging) = (-1, false);
+        if (was) { Capture = false; Cursor = Cursors.Default; Invalidate(); }
+    }
+
+    /// Called from OnMouseMove while the left button is down on a tab.
+    void DragTo(Point p)
+    {
+        if (!_dragging)
+        {
+            if (Math.Abs(p.X - _dragStart.X) < DragThreshold && Math.Abs(p.Y - _dragStart.Y) < DragThreshold) return;
+            _dragging = true;
+            Capture = true;
+        }
+        var off = TearingOff(p);
+        Cursor = off ? Cursors.SizeAll : Cursors.Default;
+        _tips.SetToolTip(this, off ? "Release to open in a new window" : "");
+        if (off) return;
+        var slot = SlotAt(p);
+        if (slot >= 0 && slot != _dragIndex)
+        {
+            var from = _dragIndex;
+            MoveTab(from, slot);
+            _dragIndex = slot;
+            TabMoved?.Invoke(from, slot);
         }
     }
 
@@ -825,11 +932,8 @@ sealed class TabStrip : Control
                     using var activeMark = new SolidBrush(Theme.Accent);
                     g.FillRectangle(activeMark, r.X, r.Y + Theme.S(8), Theme.S(2), r.Height - Theme.S(16));
                 }
-                var mark = Compact
-                    ? new Rectangle(r.X + (r.Width - IconBox) / 2, r.Y + (r.Height - IconBox) / 2, IconBox, IconBox)
-                    : new Rectangle(r.X + Theme.S(10), r.Y + (r.Height - IconBox) / 2, IconBox, IconBox);
-                if (Tabs[i].Icon is { } icon) g.DrawImage(icon, mark);
-                else Draw.Glyph(g, Theme.Globe, _iconFont, Theme.Muted, mark);
+                var mark = MarkRect(i);
+                DrawMark(g, Tabs[i], mark);
                 if (!Compact)
                 {
                     var showClose = active || i == _hotTab;
@@ -864,9 +968,8 @@ sealed class TabStrip : Control
                 g.FillRectangle(activeMark, r.X + Theme.S(12), r.Bottom - Theme.S(3), r.Width - Theme.S(24), Theme.S(2));
             }
 
-            var mark = new Rectangle(r.X + Theme.S(10), r.Y + (r.Height - IconBox) / 2, IconBox, IconBox);
-            if (Tabs[i].Icon is { } icon) g.DrawImage(icon, mark);
-            else Draw.Glyph(g, Theme.Globe, _iconFont, Theme.Muted, mark);
+            var mark = MarkRect(i);
+            DrawMark(g, Tabs[i], mark);
 
             var showClose = active || i == _hotTab;
             var textRight = showClose ? CloseRect(i).Left - Theme.S(2) : r.Right - Theme.S(10);
@@ -928,9 +1031,6 @@ sealed class PillBar : Control
         BackColor = Theme.ChromeBg;
         Height = Theme.S(30);
     }
-
-    public void Set(IEnumerable<string> labels, bool vertical = false, bool compact = false) =>
-        Set(labels.Select(l => (l, (Image?)null)), vertical, compact);
 
     public void Set(IEnumerable<(string Text, Image? Icon)> entries, bool vertical = false, bool compact = false)
     {

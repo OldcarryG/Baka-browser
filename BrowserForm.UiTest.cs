@@ -234,6 +234,75 @@ sealed partial class BrowserForm
             CloseTab(_tabs.SelectedIndex);
             Step(_open.Count == count, "Ctrl+W closes it");
 
+            // closing a background tab keeps the tab you are on
+            var keep = await NewTabAsync("https://example.com/?keep");
+            await Wait(1500);
+            var behind = await NewTabAsync("https://example.com/?behind");
+            await Wait(1500);
+            if (keep is not null && behind is not null)
+            {
+                _tabs.Select(_open.IndexOf(keep));
+                CloseTab(_open.IndexOf(behind));
+                await Wait(300);
+                Step(Current == keep, "closing a background tab keeps the selected tab");
+                CloseTab(_open.IndexOf(keep));
+                await Wait(300);
+            }
+
+            // speaker on a tab that plays sound, click to mute
+            var sound = await NewTabAsync(null, html: "<!doctype html><title>sound</title><script>const c=new AudioContext();const o=c.createOscillator();const g=c.createGain();g.gain.value=0.0001;o.connect(g);g.connect(c.destination);o.start();</script>");
+            if (sound?.View.CoreWebView2 is { } soundCore)
+            {
+                await Wait(2500);
+                var playing = sound.Strip.Audio;
+                Note($"audio tab: playing={playing} (autoplay of Web Audio can be blocked without a user gesture)");
+                soundCore.IsMuted = true;
+                await Wait(600);
+                Step(sound.Strip.Muted, "muting a tab shows the muted speaker on it");
+                CloseTab(_open.IndexOf(sound));
+                await Wait(300);
+            }
+
+            // tab right-click menu, drag to reorder, reopen closed tab
+            await NewTabAsync("https://example.com/");
+            await Wait(2500);
+            var menuIndex = _tabs.SelectedIndex;
+            var tabMenuOpened = false;
+            void TabMenuOpened(object? s, EventArgs a) => tabMenuOpened = true;
+            _tabMenu.Opened += TabMenuOpened;
+            ShowTabMenu(menuIndex, PointToScreen(new Point(Theme.S(120), Theme.S(120))));
+            await Wait(600);
+            var tabMenuItems = _tabMenu.Items.OfType<ToolStripMenuItem>().Select(i => i.Text).ToList();
+            Step(tabMenuOpened && new[] { "Close tab", "Close other tabs", "Move to new window", "Duplicate", "Reopen closed tab" }.All(tabMenuItems.Contains)
+                && _tabMenu.Items.OfType<ToolStripMenuItem>().All(i => i.Image is not null),
+                $"right-clicking a tab opens its menu with icons ({string.Join(", ", tabMenuItems)})");
+            Shot("tab-menu", menu: _tabMenu);
+            _tabMenu.Close();
+            _tabMenu.Opened -= TabMenuOpened;
+            var movedTab = _open[menuIndex];
+            _tabs.MoveTab(menuIndex, 0);
+            _open.RemoveAt(menuIndex); _open.Insert(0, movedTab);
+            Step(_open[0] == movedTab && _tabs.Tabs[0] == movedTab.Strip && Current == movedTab, "a tab can be dragged to a new position and stays selected");
+            var beforeClose = _open.Count;
+            CloseTab(0);
+            await Wait(500);
+            ReopenClosedTab();
+            await Wait(2500);
+            Step(_open.Count == beforeClose && (Current?.View.CoreWebView2?.Source ?? "").Contains("example.com"), "Ctrl+Shift+T reopens the closed tab");
+            // drag a tab off the strip: it opens in its own window (same throwaway profile) and leaves this one
+            var countBeforeTear = _open.Count;
+            MoveTabToNewWindow(_tabs.SelectedIndex, PointToScreen(new Point(Theme.S(300), Theme.S(200))));
+            var torn = LastDetachedWindow;
+            var tornWindow = false;
+            for (var i = 0; i < 40 && torn is not null && !tornWindow; i++)
+            {
+                await Wait(500);
+                try { torn.Refresh(); tornWindow = !torn.HasExited && torn.MainWindowHandle != IntPtr.Zero; } catch { }
+            }
+            Step(tornWindow && _open.Count == countBeforeTear - 1, $"dragging a tab out opens it in a new window (window={tornWindow}, tabs {countBeforeTear}->{_open.Count})");
+            await Wait(2500);
+            try { if (torn is not null && !torn.HasExited) { torn.CloseMainWindow(); if (!torn.WaitForExit(8000)) torn.Kill(); } } catch { }
+
             // 10. top tabs layout and collapsed rail
             Config.Current.TabsPosition = "Top";
             await ApplySettingsAsync();

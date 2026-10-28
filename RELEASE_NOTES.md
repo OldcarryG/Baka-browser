@@ -1,17 +1,18 @@
-# Baka Browser 1.5.0 Release
+# Baka Browser 1.6.0 Release
 
-uBlock Origin Lite out of the box, lower memory for background tabs, and tested photo/video uploads and 4K video.
+Tabs that behave like a full browser: a right-click menu, drag to reorder, drag out to a new window, and a mute button.
 
 ## What's new
 
-- **uBlock Origin Lite on first start.** New profiles get the free, open-source uBlock Origin Lite ad and tracker blocker from the Chrome Web Store (signature checked like any store install). It is added once: if you remove it, it stays removed. Turn this off in Settings > Extensions > Ad blocker. The built-in domain blocker keeps running alongside it.
-- **Less memory for background tabs.** Tabs you are not looking at ask the engine to trim caches and decoded images straight away (WebView2 `MemoryUsageTargetLevel = Low`); the tab you select goes back to normal. Idle tabs are still put to sleep after 2 minutes.
-- **Uploads tested.** The UI self-test now uploads a 3 MB photo and a 40 MB video picked through a page's file input, with a normal form, with `fetch` + `FormData`, and in 8 MB `XMLHttpRequest` chunks with progress events (the way Google Photos, YouTube and Drive upload).
-- **4K video check.** The self-test reports VP9, AV1, H.264 and HEVC 4K60 decoding support and whether the GPU decodes it.
+- **Tab menu.** Right-click any tab: New tab, Reload, Duplicate, Mute or unmute the site, Copy address, Move to new window, Close tab, Close other tabs, Close tabs below (or to the right), Reopen closed tab.
+- **Drag tabs.** Drag a tab along the strip to reorder it. Drag it off the strip and it opens in its own window where you drop it.
+- **Sound indicator.** Tabs playing audio show a speaker; click it to mute that site, click again to unmute.
+- **Keyboard.** `Ctrl+Shift+T` reopens the last closed tabs (up to 25), `Ctrl+1` to `Ctrl+8` jump to a tab, `Ctrl+9` to the last one. `Ctrl+W` from inside a page closes the tab reliably.
+- **Fixes.** Closing a background tab no longer switches the selected tab. The zoom level is applied to new tabs straight after a settings change. Tabs playing audio are not put into low-memory mode. Windows opened from a dragged-out tab do not write over the main window's session, settings or history.
+- **Smaller and cleaner.** Unused code paths and settings were removed.
 
 ## Limits
 
-- If an upload still fails on a particular site, please open an issue with the site name: the generic upload paths above all pass.
-- HEVC playback needs the HEVC codec from Microsoft Store (BAKA Windows installs it at first logon).
-- Store extensions don't update by themselves yet. To update one, remove it and add it again.
+- A tab dragged into a new window reloads its page there (it is a separate browser process).
+- Store extensions do not update by themselves yet. To update one, remove it and add it again.
 - The installer is not code-signed, so Windows SmartScreen may warn on first run.

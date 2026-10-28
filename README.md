@@ -12,6 +12,8 @@ A small, private Windows browser with Chrome Web Store extensions, a compact gra
 |---|---|---|
 | ![Settings > Extensions with the ad blocker switch and uBlock Origin Lite installed](docs/screenshots/settings-extensions.png) | ![Dark Reader popup opened from the puzzle button](docs/screenshots/extension-popup.png) | ![Settings > Performance](docs/screenshots/settings-performance.png) |
 
+![Tab right-click menu with Move to new window, Close other tabs and Reopen closed tab (1.6)](docs/screenshots/tab-menu.png)
+
 **[Download the latest release](https://github.com/OldcarryG/Baka-browser/releases/latest)**: run `BakaBrowser-win-Setup.exe`.
 
 ## Install
@@ -28,7 +30,7 @@ The installer and update packages are not Authenticode-signed in this repository
 
 ## Features
 
-- **Tabs and window controls:** Place tabs on the left or top, collapse the left tab rail, and restore up to 50 regular tabs from the previous session.
+- **Tabs and window controls:** Place tabs on the left or top, collapse the left tab rail, and restore up to 50 regular tabs from the previous session. Right-click a tab for Reload, Duplicate, Mute site, Copy address, Move to new window, Close, Close others, Close tabs below/right and Reopen closed tab. Drag tabs to reorder them, or drag one off the strip to open it in its own window. A speaker on a tab shows it plays sound; click it to mute. `Ctrl+Shift+T` reopens closed tabs, `Ctrl+1`…`Ctrl+8` jump to a tab and `Ctrl+9` to the last.
 - **Fullscreen:** Choose true fullscreen or maximize the page while keeping browser controls visible.
 - **Privacy:** WebView2 tracking prevention, built-in host rules, optional downloaded ad/tracker domains, Do Not Track and Global Privacy Control signals, JavaScript and image switches, and site-data clearing.
 - **uBlock Origin Lite by default:** New profiles get the free, open-source [uBlock Origin Lite](https://github.com/uBlockOrigin/uBOL-home) from the Chrome Web Store on first start, for element hiding and filter-list blocking. It is added once; removing it is respected. Switch: Settings > Extensions > Ad blocker.

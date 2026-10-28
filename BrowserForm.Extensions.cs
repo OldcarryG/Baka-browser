@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Drawing.Drawing2D;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
@@ -174,7 +173,8 @@ sealed partial class BrowserForm
     /// profile: if the user later removes it, it stays removed. Turned off with Settings > Privacy.
     async Task EnsureDefaultAdBlockerAsync()
     {
-        if (!_extensionsAvailable || _privateBrowsing || !Config.Current.InstallDefaultAdBlocker
+        // the main window does this; a second window on the same profile would race it for the same folder
+        if (!_extensionsAvailable || _privateBrowsing || _detached || !Config.Current.InstallDefaultAdBlocker
             || Config.Current.DefaultAdBlockerAdded || Profile is not { } profile) return;
         ExtensionPackage? package = null;
         try
@@ -183,6 +183,7 @@ sealed partial class BrowserForm
             {
                 var engine = WebStore.EngineVersion(CoreWebView2Environment.GetAvailableBrowserVersionString());
                 package = await WebStore.DownloadAsync(DefaultAdBlockerId, engine);
+                if (_closing || IsDisposed) { WebStore.Discard(package); return; }
                 var folder = WebStore.Commit(package);
                 package = null;
                 var ext = await profile.AddBrowserExtensionAsync(folder);

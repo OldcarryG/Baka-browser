@@ -84,7 +84,9 @@ sealed partial class BrowserForm : Form, IExtensionHost
     readonly System.Windows.Forms.Timer _idleTimer = new() { Interval = 30_000 };
     readonly System.Windows.Forms.Timer _updateTimer = new() { Interval = 30_000 };
     readonly System.Windows.Forms.Timer _dashboardSaveTimer = new() { Interval = 900 };
-    readonly ContextMenuStrip _displayMenu = new();
+    readonly ContextMenuStrip _tabMenu = new();
+    /// Addresses of recently closed tabs, newest last, for Ctrl+Shift+T and the tab menu.
+    readonly List<string> _closedTabs = [];
     readonly string[] _startUrls;
     readonly bool _privateBrowsing;
     readonly string? _privateProfilePath;
@@ -94,6 +96,11 @@ sealed partial class BrowserForm : Form, IExtensionHost
     Cursor? _customCursor;
     bool _closing, _trueFullscreen, _suspensionSweep, _nativeCaptionLayout;
     bool _extensionsAvailable;
+    /// A window opened by moving a tab out: it shows only that page, does not restore the session,
+    /// and leaves the main window's saved session alone when it closes.
+    readonly bool _detached;
+    /// True while the previous session's tabs are being reopened at startup.
+    bool _restoring;
     Rectangle _savedBounds;
     FormBorderStyle _savedBorderStyle;
     FormWindowState _savedWindowState;
@@ -105,6 +112,7 @@ sealed partial class BrowserForm : Form, IExtensionHost
     {
         _startUrls = startUrls;
         _privateBrowsing = privateBrowsing;
+        _detached = Args.Has("--detached");
         _privateProfilePath = privateBrowsing
             ? Path.Combine(Path.GetTempPath(), "baka-private-" + Guid.NewGuid().ToString("N")) : null;
         if (_privateProfilePath is { } temporaryProfile)
@@ -118,6 +126,14 @@ sealed partial class BrowserForm : Form, IExtensionHost
         MinimumSize = new Size(Theme.S(560), Theme.S(400));
         StartPosition = FormStartPosition.CenterScreen;
         ClientSize = new Size(Theme.S(1180), Theme.S(760));
+        if (Args.Number("--x=") is { } x && Args.Number("--y=") is { } y)
+        {
+            // Where a dragged tab was dropped, kept on the screen that point is on.
+            var area = Screen.FromPoint(new Point((int)x, (int)y)).WorkingArea;
+            StartPosition = FormStartPosition.Manual;
+            Location = new Point(Math.Clamp((int)x, area.Left, Math.Max(area.Left, area.Right - Width)),
+                                 Math.Clamp((int)y, area.Top, Math.Max(area.Top, area.Bottom - Height)));
+        }
         Icon = App.Icon;
 
         _privateBadge.Visible = privateBrowsing;
@@ -196,13 +212,29 @@ sealed partial class BrowserForm : Form, IExtensionHost
         _tabs.SelectionChanged += _ => ShowActiveTab();
         _tabs.NewTabClicked += () => _ = NewTabAsync(null);
         _tabs.CloseClicked += CloseTab;
+        _tabs.TabMenuRequested += ShowTabMenu;
+        _tabs.AudioClicked += i =>
+        {
+            if (i < 0 || i >= _open.Count || _open[i].View.CoreWebView2 is not { } core) return;
+            try { core.IsMuted = !core.IsMuted; } catch { }
+        };
+        _tabs.TabMoved += (from, to) =>
+        {
+            if (from < 0 || to < 0 || from >= _open.Count || to >= _open.Count) return;
+            var moved = _open[from];
+            _open.RemoveAt(from);
+            _open.Insert(to, moved);
+        };
+        _tabs.TabDraggedOut += (index, at) => MoveTabToNewWindow(index, at);
+        Theme.Style(_tabMenu);
 
         _idleTimer.Tick += async (_, _) => await SuspendIdleTabsAsync();
         _dashboardSaveTimer.Tick += (_, _) =>
         {
             _dashboardSaveTimer.Stop();
+            if (_privateBrowsing || _detached) return;
             SaveSession();
-            if (!_privateBrowsing) Config.Current.Save();
+            Config.Current.Save();
         };
         _updateTimer.Tick += async (_, _) =>
         {
@@ -222,12 +254,14 @@ sealed partial class BrowserForm : Form, IExtensionHost
             _idleTimer.Stop();
             _updateTimer.Stop();
             _dashboardSaveTimer.Stop();
-            if (!_privateBrowsing)
+            // A window opened by moving a tab out shares the profile with the main window. It must not write
+            // its start-up copy of settings or history over what the main window saved since then.
+            if (!_privateBrowsing && !_detached)
             {
                 SaveSession();
                 Config.Current.Save();
+                History.Rewrite();
             }
-            if (!_privateBrowsing) History.Rewrite();
         };
     }
 
@@ -409,18 +443,28 @@ sealed partial class BrowserForm : Form, IExtensionHost
 
         if (_closing || IsDisposed) return;
         ApplyNativeCursor();
-        if (!_privateBrowsing && _startUrls.Length == 0 && Config.Current.RestoreLastSession && Config.Current.LastSessionTabs.Count > 0)
+        if (_detached && _startUrls.Length > 0)
         {
+            foreach (var u in _startUrls) await NewTabAsync(Url.From(u, Config.Current.SearchUrl));
+            if (_open.Count == 0) await NewTabAsync(null, home: true);
+        }
+        else if (!_privateBrowsing && !_detached && _startUrls.Length == 0 && Config.Current.RestoreLastSession && Config.Current.LastSessionTabs.Count > 0)
+        {
+            // A copy: while tabs open, nothing may save a half-restored session over the saved one.
+            var saved = Config.Current.LastSessionTabs.ToList();
             var savedActiveIndex = Config.Current.LastActiveTabIndex;
             Tab? savedActive = null;
-            for (var i = 0; i < Config.Current.LastSessionTabs.Count; i++)
+            _restoring = true;
+            try
             {
-                var savedUrl = Config.Current.LastSessionTabs[i];
-                var tab = savedUrl.Length == 0
-                    ? await NewTabAsync(null, home: true)
-                    : await NewTabAsync(savedUrl);
-                if (tab is not null && i == savedActiveIndex) savedActive = tab;
+                for (var i = 0; i < saved.Count && !_closing; i++)
+                {
+                    var tab = saved[i].Length == 0 ? await NewTabAsync(null, home: true) : await NewTabAsync(saved[i]);
+                    if (tab is not null && i == savedActiveIndex) savedActive = tab;
+                }
             }
+            finally { _restoring = false; }
+            if (_closing) return;
             if (_open.Count == 0) await NewTabAsync(null, home: true);
             else if (savedActive is not null) _tabs.Select(_open.IndexOf(savedActive));
             else _tabs.Select(0);
@@ -543,7 +587,7 @@ sealed partial class BrowserForm : Form, IExtensionHost
 
     void SaveSession()
     {
-        if (_privateBrowsing) return;
+        if (_privateBrowsing || _detached || _restoring) return;
         if (!Config.Current.RestoreLastSession)
         {
             Config.Current.LastSessionTabs = [];
@@ -551,21 +595,8 @@ sealed partial class BrowserForm : Form, IExtensionHost
             return;
         }
 
-        var tabs = new List<string>();
-        foreach (var tab in _open)
-        {
-            var source = tab.View.CoreWebView2?.Source ?? "";
-            if (tab.IsHomePage || source.Equals("about:blank", StringComparison.OrdinalIgnoreCase))
-            {
-                tabs.Add("");
-                continue;
-            }
-            if (Uri.TryCreate(source, UriKind.Absolute, out var uri) &&
-                (uri.Scheme is "http" or "https" or "file") && source.Length <= 4096)
-                tabs.Add(source);
-            else
-                tabs.Add("");
-        }
+        // "" restores as the new-tab page
+        var tabs = _open.Select(t => t.IsHomePage ? "" : TabUrl(t) ?? "").ToList();
 
         const int maxSessionTabs = 50;
         var firstSaved = Math.Max(0, tabs.Count - maxSessionTabs);
@@ -584,9 +615,11 @@ sealed partial class BrowserForm : Form, IExtensionHost
         ApplyNativeCursor();
         RefreshPrivacyRuleCache();
         LayoutTabs();
-        foreach (var t in _open)
-            if (t.View.CoreWebView2 is { } core)
+        // a copy: tabs can open or close while this awaits
+        foreach (var t in _open.ToArray())
+            if (!t.View.IsDisposed && _open.Contains(t) && t.View.CoreWebView2 is { } core)
             {
+                try { t.View.ZoomFactor = Config.Current.ZoomFactor; } catch { }
                 core.Profile.PreferredTrackingPreventionLevel = TrackingLevel();
                 ApplyPagePreferences(core, t.DefaultUserAgent);
                 if (t.IsHomePage) core.Settings.IsScriptEnabled = true;
@@ -744,7 +777,6 @@ sealed partial class BrowserForm : Form, IExtensionHost
             HasHomePage = home || (url is null && html is null),
             HomeNonce = Guid.NewGuid().ToString("N"),
         };
-        tab.Strip.Tag = tab;
         _content.Controls.Add(view);
         if (_customCursor is not null) ApplyCursorTree(view);
         _open.Add(tab);
@@ -841,7 +873,18 @@ sealed partial class BrowserForm : Form, IExtensionHost
         // A focused page owns the keyboard: ProcessCmdKey never sees Ctrl+H. The wrapper re-raises the
         // accelerators the engine saw as plain KeyDown on the control, and Handled suppresses whatever
         // the engine would have done with them (Ctrl+P's print dialog, and so on).
-        tab.View.KeyDown += (_, e) => { if (Shortcut(e.KeyData)) e.Handled = e.SuppressKeyPress = true; };
+        // The shortcut runs after this event returns: Ctrl+W would otherwise dispose this WebView2 while its
+        // own key event is still on the stack.
+        tab.View.KeyDown += (_, e) =>
+        {
+            if (e.KeyData == (Keys.Control | Keys.W))
+            {
+                e.Handled = e.SuppressKeyPress = true;
+                BeginInvoke(() => CloseTab(_open.IndexOf(tab)));
+                return;
+            }
+            if (Shortcut(e.KeyData)) e.Handled = e.SuppressKeyPress = true;
+        };
 
         core.Profile.PreferredTrackingPreventionLevel = TrackingLevel();
         core.Settings.IsGeneralAutofillEnabled = false;
@@ -868,6 +911,13 @@ sealed partial class BrowserForm : Form, IExtensionHost
         core.SourceChanged += (_, _) => { if (tab == Current) { ShowUrl(core.Source); UpdateStar(); UpdateStoreButton(); } };
         core.HistoryChanged += (_, _) => { if (tab == Current) SyncNavButtons(core); };
         core.FaviconChanged += async (_, _) => await LoadFaviconAsync(tab);
+        // speaker on tabs that play sound; clicking it mutes the site
+        void SyncAudio()
+        {
+            try { (tab.Strip.Audio, tab.Strip.Muted) = (core.IsDocumentPlayingAudio, core.IsMuted); } catch { return; }
+            _tabs.Invalidate();
+        }
+        try { core.IsDocumentPlayingAudioChanged += (_, _) => SyncAudio(); core.IsMutedChanged += (_, _) => SyncAudio(); } catch { }
 
         core.NavigationStarting += (_, e) =>
         {
@@ -911,6 +961,7 @@ sealed partial class BrowserForm : Form, IExtensionHost
                 var t = await NewTabAsync(null, html: "");
                 if (t is not null) { e.NewWindow = t.View.CoreWebView2; e.Handled = true; }
             }
+            catch { /* the opener went away or the runtime refused the window: the page just gets no popup */ }
             finally { deferral.Complete(); }
         };
     }
@@ -1093,9 +1144,14 @@ sealed partial class BrowserForm : Form, IExtensionHost
             // Background tabs ask the engine to trim memory (caches, decoded images); the visible one runs normally.
             if (t.View.CoreWebView2 is { } levelCore)
             {
-                var level = active ? Microsoft.Web.WebView2.Core.CoreWebView2MemoryUsageTargetLevel.Normal
-                                   : Microsoft.Web.WebView2.Core.CoreWebView2MemoryUsageTargetLevel.Low;
-                try { if (levelCore.MemoryUsageTargetLevel != level) levelCore.MemoryUsageTargetLevel = level; } catch { }
+                try
+                {
+                    // a background tab that is playing music or video keeps normal memory, like it is never put to sleep
+                    var level = active || levelCore.IsDocumentPlayingAudio
+                        ? CoreWebView2MemoryUsageTargetLevel.Normal : CoreWebView2MemoryUsageTargetLevel.Low;
+                    if (levelCore.MemoryUsageTargetLevel != level) levelCore.MemoryUsageTargetLevel = level;
+                }
+                catch { }
             }
             if (!active) continue;
             t.SuspendRetryAfterUtc = DateTime.MinValue;
@@ -1114,10 +1170,20 @@ sealed partial class BrowserForm : Form, IExtensionHost
         }
     }
 
-    void CloseTab(int index)
+    /// `remember` puts the page on the reopen-closed-tab list (not for a tab that was moved to another window).
+    void CloseTab(int index) => CloseTab(index, remember: true);
+
+    void CloseTab(int index, bool remember)
     {
         if (index < 0 || index >= _open.Count) return;
         var tab = _open[index];
+        if (remember && !tab.IsHomePage && TabUrl(tab) is { } closedUrl)
+        {
+            _closedTabs.Add(closedUrl);
+            if (_closedTabs.Count > 25) _closedTabs.RemoveAt(0);
+        }
+        // Closing a background tab keeps the tab you are looking at; closing the active one selects its neighbour.
+        var selected = _tabs.SelectedIndex;
         _open.RemoveAt(index);
         _tabs.Tabs.RemoveAt(index);
         _tabs.RefreshLayout();
@@ -1125,8 +1191,7 @@ sealed partial class BrowserForm : Form, IExtensionHost
         ForgetCursorTree(tab.View);
         tab.View.Dispose();
         if (_open.Count == 0) { Close(); return; }
-        _tabs.Removed(index);
-        ShowActiveTab();
+        _tabs.Removed(index < selected ? selected - 1 : index == selected ? Math.Min(index, _open.Count - 1) : selected);
     }
 
     async Task SuspendIdleTabsAsync()
@@ -1280,6 +1345,13 @@ sealed partial class BrowserForm : Form, IExtensionHost
                 ExitTrueFullscreen();
                 return true;
             case Keys.Control | Keys.T: _ = NewTabAsync(null); return true;
+            case Keys.Control | Keys.Shift | Keys.T: ReopenClosedTab(); return true;
+            case Keys.Control | Keys.D1: case Keys.Control | Keys.D2: case Keys.Control | Keys.D3:
+            case Keys.Control | Keys.D4: case Keys.Control | Keys.D5: case Keys.Control | Keys.D6:
+            case Keys.Control | Keys.D7: case Keys.Control | Keys.D8:
+                if (_open.Count > 0) _tabs.Select(Math.Min(_open.Count - 1, (int)(keyData & Keys.KeyCode) - (int)Keys.D1));
+                return true;
+            case Keys.Control | Keys.D9: if (_open.Count > 0) _tabs.Select(_open.Count - 1); return true;
             case Keys.Control | Keys.Shift | Keys.N: OpenPrivateWindow(); return true;
             case Keys.Control | Keys.W: CloseTab(_tabs.SelectedIndex); return true;
             case Keys.Control | Keys.L:
@@ -1364,15 +1436,14 @@ sealed partial class BrowserForm : Form, IExtensionHost
             _dashboardSaveTimer.Dispose();
             _mainMenu.Dispose();
             _extensionsMenu.Dispose();
+            _tabMenu.Dispose();
+            LastDetachedWindow?.Dispose();
             _popup?.Dispose();
             foreach (var icon in _extensionIcons.Values) icon.Dispose();
         }
         base.Dispose(disposing);
-        if (disposing)
-        {
-            _customCursor?.Dispose();
-            if (_privateProfilePath is { } privatePath) _ = DeletePrivateProfileAsync(privatePath);
-        }
+        // the private profile folder is deleted at process exit (DeletePrivateProfileOnExit), once WebView2 has let go of it
+        if (disposing) _customCursor?.Dispose();
     }
 
     void OpenPrivateWindow()
@@ -1384,18 +1455,6 @@ sealed partial class BrowserForm : Form, IExtensionHost
             Process.Start(new ProcessStartInfo(exe, "--private") { UseShellExecute = true });
         }
         catch (Exception ex) { MessageBox.Show($"Could not open a private window.\n\n{ex.Message}", App.Name); }
-    }
-
-    static async Task DeletePrivateProfileAsync(string path)
-    {
-        if (!IsPrivateProfilePath(path)) return;
-        var fullPath = Path.GetFullPath(path);
-        for (var attempt = 0; attempt < 30; attempt++)
-        {
-            try { if (Directory.Exists(fullPath)) Directory.Delete(fullPath, recursive: true); return; }
-            catch (IOException) { await Task.Delay(400); }
-            catch (UnauthorizedAccessException) { await Task.Delay(400); }
-        }
     }
 
     static void DeletePrivateProfileOnExit(string path)
